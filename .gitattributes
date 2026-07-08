@@ -1,0 +1,2 @@
+# Normaliza los finales de línea a LF en el repositorio (Vercel construye en Linux).
+* text=auto eol=lf
