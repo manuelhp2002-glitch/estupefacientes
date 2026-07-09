@@ -1,11 +1,13 @@
-# Backend — Google Apps Script (pendiente · Fase 2)
+# Backend — Google Apps Script
 
-Esta carpeta contendrá el backend de EstupeFarma: un **Web App de Google Apps Script**
-que expone `doPost`/`doGet` sobre una hoja de Google Sheets como base de datos.
+Backend de EstupeFarma: un **Web App de Google Apps Script** (`Code.gs`) que expone
+`doPost`/`doGet` sobre una hoja de Google Sheets como base de datos.
 
-Hoy está **vacía a propósito**: en la Fase 0 la app corre en *modo local* (datos en
-memoria). El `Code.gs` se escribe y audita en la **Fase 2** contra el contrato de
-`CLAUDE.md §5`.
+Archivos:
+- **`Code.gs`** — implementación del contrato (`list/append/appendMany/update/remove`),
+  con mapeo por cabecera + auto-extensión de columnas, `LockService`, dedup idempotente por
+  `id`, guard de privacidad acotado (§1) y `setup()`/`setupCruces()` no destructivos.
+- **`appsscript.json`** — manifiesto (runtime V8, Web App como el usuario, acceso anónimo).
 
 ## Contrato esperado por el frontend (`api/client.js`)
 
