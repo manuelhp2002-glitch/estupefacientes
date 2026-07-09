@@ -207,11 +207,16 @@ function lsGet(key, fallback) {
 function lsSet(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch { /* cuota/privado */ } }
 function lsDel(key) { try { localStorage.removeItem(key); } catch { /* noop */ } }
 
-// URL inicial: localStorage → variable de entorno (Vercel) → ""
+// URL del Web App por defecto: así la app viene CONECTADA de fábrica y el usuario no
+// tiene que pegar nada (endpoint público /exec, ya viaja en el bundle). Se puede
+// sobreescribir desde Ajustes (localStorage) o con VITE_APPS_SCRIPT_URL en Vercel.
+const DEFAULT_APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwa5oXOwvpANsIT-4oPviiLFjDIaiwkEMG2SB5KJ9DASow8IThbodM_DSDCvO6jiBzz/exec";
+
+// URL inicial: localStorage → variable de entorno (Vercel) → URL por defecto
 function resolveInitialUrl() {
   const stored = lsGet(LS.url, null);
   if (stored) return stored;
-  return (import.meta.env && import.meta.env.VITE_APPS_SCRIPT_URL) || "";
+  return (import.meta.env && import.meta.env.VITE_APPS_SCRIPT_URL) || DEFAULT_APPS_SCRIPT_URL;
 }
 function isOffline() { return typeof navigator !== "undefined" && navigator.onLine === false; }
 
