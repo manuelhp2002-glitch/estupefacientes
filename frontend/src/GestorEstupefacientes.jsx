@@ -4,7 +4,7 @@ import {
   Home, ClipboardList, History, ShieldAlert, PackageSearch, CalendarX,
   AlertTriangle, Plus, Save, X, Upload, Search, CheckCircle2, Clock,
   Settings, RefreshCw, Cloud, CloudOff, Truck, FileSpreadsheet, Trash2,
-  ChevronRight, Info, Pill, Syringe, Filter, ArrowRight, ListChecks
+  ChevronRight, Info, Pill, Syringe, Filter, ArrowRight, ListChecks, Bell
 } from "lucide-react";
 
 /* ============================================================================
@@ -241,6 +241,36 @@ function normalizeMed(r) {
   const num = (v) => (v === "" || v == null ? null : Number(v));
   const grupo = String(r.grupo || "").toUpperCase() === "IV" ? "IV" : "ORAL";
   return { codigoV: String(r.codigoV || "").trim(), nombre: String(r.nombre || "").trim(), grupo, max: num(r.max), min: num(r.min) };
+}
+
+/* ---------------------------------------------------------------------------
+   ALERTAS — registro accionable de avisos de reposición (pedido) y del Detector.
+   IDs deterministas para deduplicar en el backend (reenvío de cola idempotente).
+--------------------------------------------------------------------------- */
+function sanitizeId(s) { return String(s || "").replace(/[^a-zA-Z0-9]+/g, "_"); }
+// Fusiona alertas nuevas preservando el estado (hecha/descartada) de las ya existentes
+function mergeAlertas(prev, nuevas) {
+  const byId = new Map(prev.map((a) => [a.id, a]));
+  nuevas.forEach((n) => { const ex = byId.get(n.id); byId.set(n.id, ex ? { ...n, estado: ex.estado } : n); });
+  return Array.from(byId.values());
+}
+// Alerta de reposición a partir de un aviso de inventario
+function alertaReposicion(aviso, fecha) {
+  return {
+    id: `rep-${sanitizeId(aviso.codigoV)}-${sanitizeId(fecha)}`,
+    origen: "inventario", tipo: "pedido", codigos: "",
+    codigoV: aviso.codigoV, medicamento: aviso.nombre, nivel: aviso.level,
+    fecha, detalle: `${aviso.accion} · stock real ${aviso.real}`, estado: "pendiente",
+  };
+}
+// Alerta del Detector a partir de una fila del cruce con flags
+function alertaDetector(r) {
+  return {
+    id: `det-${sanitizeId(r.codigoV)}-${sanitizeId(r.fecha)}-${sanitizeId(r.cantidad)}-${sanitizeId(r.alertas)}`,
+    origen: "detector", tipo: "detector", codigos: r.alertas || "",
+    codigoV: r.codigoV, medicamento: r.medicamento, nivel: r.nivel,
+    fecha: r.fecha, detalle: `${r.tipo || "movimiento"} · ${r.cantidad} uds`, estado: "pendiente",
+  };
 }
 
 /* ---------------------------------------------------------------------------
@@ -892,15 +922,19 @@ function estadoPedido(p) {
 }
 const estadoBadge = { Pendiente: "info", Recibido: "ok", Incidencia: "warn", "No servido": "crit" };
 
-function RegistroPedidos({ pedidos, onCreate, onUpdate, meds }) {
+function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, prefill, clearPrefill }) {
   const [openNew, setOpenNew] = useState(false);
   const [openRecep, setOpenRecep] = useState(null);
   const [f, setF] = useState({});
   const [r, setR] = useState({});
 
+  // Prefill desde una alerta de reposición: abre el drawer con el medicamento cargado
+  useEffect(() => { if (prefill) { setF({ ...prefill }); setOpenNew(true); } }, [prefill]);
+
+  const cerrarNuevo = () => { setOpenNew(false); setF({}); if (clearPrefill) clearPrefill(); };
   const crear = async () => {
     const nuevo = { id: uid(), ...f, uds: f.udsPedidas, estado: "Pendiente", noServido: false, avisoLlegada: false };
-    await onCreate(nuevo); setOpenNew(false); setF({});
+    await onCreate(nuevo); cerrarNuevo();
   };
   const recepcionar = async () => {
     const upd = { ...openRecep, ...r, noServido: !!r.noServido };
@@ -945,8 +979,8 @@ function RegistroPedidos({ pedidos, onCreate, onUpdate, meds }) {
       </Card>
 
       {/* Nuevo pedido */}
-      <Drawer open={openNew} title="Nuevo pedido" onClose={() => setOpenNew(false)}
-        footer={<><button style={btnGhost} onClick={() => setOpenNew(false)}>Cancelar</button><button style={btnPrimary} onClick={crear}><Save size={15} /> Crear</button></>}>
+      <Drawer open={openNew} title="Nuevo pedido" onClose={cerrarNuevo}
+        footer={<><button style={btnGhost} onClick={cerrarNuevo}>Cancelar</button><button style={btnPrimary} onClick={crear}><Save size={15} /> Crear</button></>}>
         <Field label="Nº de vale"><input style={inputStyle} value={f.vale || ""} onChange={(e) => setF({ ...f, vale: e.target.value })} /></Field>
         <Field label="CN (Código Nacional)"><input style={inputStyle} value={f.cn || ""} onChange={(e) => setF({ ...f, cn: e.target.value })} /></Field>
         <Field label="Estupefaciente (Código V + nombre)">
@@ -1198,6 +1232,91 @@ function Empty({ icon, text, small }) {
 }
 
 /* ===========================================================================
+   ALERTAS (accionables)
+=========================================================================== */
+function AlertasView({ alertas, onEstado, onPedir }) {
+  const [tipo, setTipo] = useState("todos");
+  const [verCerradas, setVerCerradas] = useState(false);
+
+  const codigos = useMemo(() => {
+    const s = new Set();
+    alertas.forEach((a) => String(a.codigos || "").split(/\s+/).filter(Boolean).forEach((c) => s.add(c)));
+    return Array.from(s).sort();
+  }, [alertas]);
+
+  const filtradas = alertas.filter((a) => {
+    if (!verCerradas && a.estado !== "pendiente") return false;
+    if (tipo === "todos") return true;
+    if (tipo === "pedido") return a.tipo === "pedido";
+    return String(a.codigos || "").split(/\s+/).includes(tipo);
+  });
+  const pend = alertas.filter((a) => a.estado === "pendiente").length;
+  const estadoBadgeLevel = { pendiente: "warn", hecha: "ok", descartada: "none" };
+
+  return (
+    <div>
+      <SectionTitle title="Alertas" desc="Avisos de reposición (pedir medicamento) y alertas del Detector (E01–E12), accionables."
+        right={<div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <select style={{ ...inputStyle, width: "auto" }} value={tipo} onChange={(e) => setTipo(e.target.value)}>
+            <option value="todos">Todos los tipos</option>
+            <option value="pedido">Pedido (reposición)</option>
+            {codigos.map((c) => <option key={c} value={c}>{c}{ERROR_CATALOG[c] ? ` · ${ERROR_CATALOG[c].nombre}` : ""}</option>)}
+          </select>
+          <label style={{ display: "inline-flex", gap: 6, alignItems: "center", fontSize: 13, color: C.text, cursor: "pointer" }}>
+            <input type="checkbox" checked={verCerradas} onChange={(e) => setVerCerradas(e.target.checked)} /> Ver hechas/descartadas
+          </label>
+        </div>} />
+
+      <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
+        <Badge level={pend ? "warn" : "ok"}>{pend} pendientes</Badge>
+        <Badge level="none">{alertas.length} en total</Badge>
+      </div>
+
+      <Card style={{ padding: 0, overflow: "hidden" }}>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 900 }}>
+            <thead><tr>
+              <th style={th}>Nivel</th><th style={th}>Tipo</th><th style={th}>Medicamento</th>
+              <th style={th}>Código V</th><th style={th}>Fecha</th><th style={th}>Detalle</th>
+              <th style={th}>Estado</th><th style={th}>Acciones</th>
+            </tr></thead>
+            <tbody>
+              {filtradas.length === 0 && <tr><td colSpan={8} style={{ ...td, textAlign: "center", color: C.sub, padding: 26 }}>Sin alertas para este filtro.</td></tr>}
+              {filtradas.map((a) => (
+                <tr key={a.id} style={{ background: a.estado !== "pendiente" ? "#F9FAFB" : (rowBg[a.nivel] || "#fff") }}>
+                  <td style={td}><Badge level={a.nivel || "none"}>{a.nivel === "crit" ? "Crítica" : a.nivel === "warn" ? "Vigilar" : "—"}</Badge></td>
+                  <td style={td}>{a.tipo === "pedido" ? <Badge level="info">Pedido</Badge> : (
+                    <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                      {String(a.codigos || "").split(/\s+/).filter(Boolean).map((c) => <Badge key={c} level={ERROR_CATALOG[c] ? ERROR_CATALOG[c].nivel : "none"}>{c}</Badge>)}
+                    </div>
+                  )}</td>
+                  <td style={{ ...td, minWidth: 200 }}>{a.medicamento}</td>
+                  <td style={{ ...td, fontFamily: "monospace", fontSize: 12 }}>{a.codigoV || "—"}</td>
+                  <td style={{ ...td, whiteSpace: "nowrap" }}>{a.fecha ? (String(a.fecha).includes("-") ? fmtDate(a.fecha) : a.fecha) : "—"}</td>
+                  <td style={td}>{a.detalle}</td>
+                  <td style={td}><Badge level={estadoBadgeLevel[a.estado] || "none"}>{a.estado}</Badge></td>
+                  <td style={td}>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                      {a.estado === "pendiente" ? <>
+                        {a.tipo === "pedido" && <button style={{ ...microBtn, background: C.accent, color: "#fff", border: "none" }} onClick={() => onPedir(a)}><PackageSearch size={13} /> Pedir</button>}
+                        <button style={microBtn} onClick={() => onEstado(a.id, "hecha")}><CheckCircle2 size={13} /> Hecha</button>
+                        <button style={microBtn} onClick={() => onEstado(a.id, "descartada")}><X size={13} /> Descartar</button>
+                      </> : (
+                        <button style={microBtn} onClick={() => onEstado(a.id, "pendiente")}><RefreshCw size={13} /> Reabrir</button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+/* ===========================================================================
    APP PRINCIPAL
 =========================================================================== */
 const NAV = [
@@ -1205,6 +1324,7 @@ const NAV = [
   ["inventario", "Inventario semanal", ClipboardList],
   ["anteriores", "Inventarios anteriores", History],
   ["detector", "Detector de alertas", ShieldAlert],
+  ["alertas", "Alertas", Bell],
   ["pedidos", "Registro de pedidos", PackageSearch],
   ["caducados", "Med. caducados", CalendarX],
   ["incidencias", "Incidencias", AlertTriangle],
@@ -1226,9 +1346,11 @@ export default function App() {
   const [caducados, setCaducados] = useState(() => lsGet(LS.data("Caducados"), []));
   const [incidencias, setIncidencias] = useState(() => lsGet(LS.data("Incidencias"), []));
   const [meds, setMeds] = useState(() => lsGet(LS.data("Catalogo"), ALL_MEDS));
+  const [alertas, setAlertas] = useState(() => lsGet(LS.data("Alertas"), []));
   const [resumenAlertas, setResumenAlertas] = useState(null);
   const [avisosRepo, setAvisosRepo] = useState([]);
   const [incPrefill, setIncPrefill] = useState(null);
+  const [pedidoPrefill, setPedidoPrefill] = useState(null);
 
   const medByV = useMemo(() => Object.fromEntries(meds.map((m) => [m.codigoV, m])), [meds]);
 
@@ -1240,6 +1362,7 @@ export default function App() {
   useEffect(() => { lsSet(LS.data("Caducados"), caducados); }, [caducados]);
   useEffect(() => { lsSet(LS.data("Incidencias"), incidencias); }, [incidencias]);
   useEffect(() => { lsSet(LS.data("Catalogo"), meds); }, [meds]);
+  useEffect(() => { lsSet(LS.data("Alertas"), alertas); }, [alertas]);
 
   // Vuelca la cola de escrituras pendientes al backend (idempotente por id)
   const flush = async () => { const restantes = await outboxFlush(api); setPendientes(restantes); return restantes; };
@@ -1255,11 +1378,15 @@ export default function App() {
       ]);
       setInventarios(inv.rows || []); setPedidos(ped.rows || []); setCaducados(cad.rows || []);
       setIncidencias(inc.rows || []);
-      // El catálogo se lee aparte: si el backend aún no tiene la hoja, no debe romper el resto
+      // Catálogo y alertas se leen aparte: si el backend aún no tiene la hoja, no rompen el resto
       try {
         const cat = await api.list("Catalogo");
         if (cat && cat.rows && cat.rows.length) setMeds(cat.rows.map(normalizeMed)); // hoja vacía → se mantiene la semilla
       } catch (e2) { /* backend sin hoja Catalogo: se usa la semilla local */ }
+      try {
+        const ale = await api.list("Alertas");
+        if (ale && ale.rows) setAlertas(ale.rows);
+      } catch (e3) { /* backend sin hoja Alertas: se mantienen las locales */ }
       notify("Datos cargados desde Google Sheets");
     } catch (e) { notify("Sin conexión a Sheets — trabajando en local", "warn"); }
     setSyncing(false);
@@ -1277,22 +1404,41 @@ export default function App() {
   // Encola una escritura (persistida en el outbox) y la intenta enviar ya si hay conexión
   const enqueue = async (op) => { const n = outboxAdd(op); setPendientes(n); return flush(); };
 
+  // Alertas — cambiar estado (hecha/descartada/pendiente) y pedir desde una alerta
+  const marcarAlerta = async (id, estado) => {
+    const actual = alertas.find((a) => a.id === id);
+    setAlertas((prev) => prev.map((a) => a.id === id ? { ...a, estado } : a));
+    await enqueue({ action: "update", sheet: "Alertas", id, row: { ...(actual || { id }), estado } });
+  };
+  const pedirDesdeAlerta = (a) => { setPedidoPrefill({ estupefaciente: `${a.codigoV} · ${a.medicamento}`, _alertaId: a.id }); setView("pedidos"); };
+
   // Sufijo de aviso cuando la escritura queda pendiente de sincronizar
   const pendSuffix = () => (!api.connected() || isOffline()) ? " · pendiente de sincronizar" : "";
 
   // Inventario (una escritura por lotes a la pestaña Inventarios)
-  const guardarInventario = async ({ filas }) => {
+  const guardarInventario = async ({ fecha, filas }) => {
     setInventarios((prev) => [...prev, ...filas]);
     await enqueue({ action: "appendMany", sheet: "Inventarios", rows: filas });
-    // Avisos de reposición
+    // Avisos de reposición → se muestran y se registran como alertas accionables (pedido)
     const avisos = [];
     filas.forEach((f) => { const sl = stockLevel(f.real, medByV[f.codigoV]); if (sl && (sl.level === "warn" || sl.level === "crit")) avisos.push({ codigoV: f.codigoV, nombre: f.nombre, accion: sl.txt, real: f.real, level: sl.level }); });
     setAvisosRepo(avisos);
+    if (avisos.length) {
+      const alertRows = avisos.map((a) => alertaReposicion(a, fecha));
+      setAlertas((prev) => mergeAlertas(prev, alertRows));
+      await enqueue({ action: "appendMany", sheet: "Alertas", rows: alertRows });
+    }
     notify(`Inventario guardado (${filas.length} líneas)${avisos.length ? ` · ${avisos.length} avisos de reposición` : ""}${pendSuffix()}`);
   };
 
   // Pedidos
-  const crearPedido = async (p) => { setPedidos((prev) => [p, ...prev]); await enqueue({ action: "append", sheet: "Pedidos", row: p }); notify("Pedido creado" + pendSuffix()); };
+  const crearPedido = async (p) => {
+    const alertaId = p._alertaId; if (alertaId) delete p._alertaId; // enlace opcional a una alerta de reposición
+    setPedidos((prev) => [p, ...prev]);
+    await enqueue({ action: "append", sheet: "Pedidos", row: p });
+    if (alertaId) await marcarAlerta(alertaId, "hecha");
+    notify("Pedido creado" + pendSuffix());
+  };
   const actualizarPedido = async (p) => { setPedidos((prev) => prev.map((x) => x.id === p.id ? p : x)); await enqueue({ action: "update", sheet: "Pedidos", id: p.id, row: p }); if (p.avisoLlegada && estadoPedido(p) === "Pendiente") notify("Aviso de llegada registrado — notificado al supervisor"); else notify("Pedido actualizado" + pendSuffix()); };
 
   // Caducados
@@ -1307,10 +1453,17 @@ export default function App() {
   // Guarda la tabla completa del cruce en la pestaña "Cruces" (por lotes, vía cola offline-first)
   const guardarCruce = async (rows) => {
     await enqueue({ action: "appendMany", sheet: "Cruces", rows });
-    notify(`Cruce guardado (${rows.length} filas)${pendSuffix()}`);
+    // Las filas con flags se registran además como alertas accionables del detector
+    const alertRows = rows.filter((r) => r.alertas && String(r.alertas).trim()).map(alertaDetector);
+    if (alertRows.length) {
+      setAlertas((prev) => mergeAlertas(prev, alertRows));
+      await enqueue({ action: "appendMany", sheet: "Alertas", rows: alertRows });
+    }
+    notify(`Cruce guardado (${rows.length} filas)${alertRows.length ? ` · ${alertRows.length} alertas` : ""}${pendSuffix()}`);
   };
 
   const connected = api.connected();
+  const alertasPend = alertas.filter((a) => a.estado === "pendiente").length;
 
   return (
     <div style={{ display: "flex", height: "100vh", fontFamily: "'Segoe UI', system-ui, sans-serif", background: C.bg, color: C.text }}>
@@ -1329,6 +1482,7 @@ export default function App() {
             }}>
               <Icon size={17} /> {label}
               {id === "inicio" && resumenAlertas && resumenAlertas.criticas > 0 && <span style={{ marginLeft: "auto", background: C.red, borderRadius: 999, fontSize: 11, padding: "1px 7px" }}>{resumenAlertas.criticas}</span>}
+              {id === "alertas" && alertasPend > 0 && <span style={{ marginLeft: "auto", background: C.accent, borderRadius: 999, fontSize: 11, padding: "1px 7px" }}>{alertasPend}</span>}
             </button>
           ))}
         </nav>
@@ -1355,7 +1509,8 @@ export default function App() {
         {view === "inventario" && <InventarioSemanal onSaved={guardarInventario} avisos={avisosRepo} meds={meds} medByV={medByV} />}
         {view === "anteriores" && <InventariosAnteriores inventarios={inventarios} />}
         {view === "detector" && <DetectorAlertas onResumen={registrarResumenAlertas} onGuardarCruce={guardarCruce} sheetsConnected={connected} onNombrePaciente={() => notify("⚠️ Posible nombre de paciente detectado y excluido del procesamiento", "crit")} />}
-        {view === "pedidos" && <RegistroPedidos pedidos={pedidos} onCreate={crearPedido} onUpdate={actualizarPedido} meds={meds} />}
+        {view === "alertas" && <AlertasView alertas={alertas} onEstado={marcarAlerta} onPedir={pedirDesdeAlerta} />}
+        {view === "pedidos" && <RegistroPedidos pedidos={pedidos} onCreate={crearPedido} onUpdate={actualizarPedido} meds={meds} prefill={pedidoPrefill} clearPrefill={() => setPedidoPrefill(null)} />}
         {view === "caducados" && <Caducados caducados={caducados} onCreate={crearCaducado} />}
         {view === "incidencias" && <Incidencias incidencias={incidencias} onCreate={crearIncidencia} onUpdate={actualizarIncidencia} prefill={incPrefill} clearPrefill={() => setIncPrefill(null)} meds={meds} />}
       </main>
