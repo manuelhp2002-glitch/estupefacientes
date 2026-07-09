@@ -15,13 +15,11 @@ import {
    ============================================================================ */
 
 /* ---------------------------------------------------------------------------
-   CONFIGURACIÓN — pega aquí la URL del Web App de Apps Script tras desplegarlo.
-   Si se deja vacío, la app funciona en "Modo local" (datos solo en memoria).
-   También se puede pegar en tiempo de ejecución desde el botón Ajustes.
+   CONFIGURACIÓN — la URL del Web App de Apps Script se resuelve por prioridad:
+   localStorage (lo pegado en Ajustes, persistente) → variable de entorno
+   VITE_APPS_SCRIPT_URL (definida en Vercel) → "" (modo local con persistencia
+   en este equipo). Ver resolveInitialUrl() más abajo.
 --------------------------------------------------------------------------- */
-const CONFIG = {
-  APPS_SCRIPT_URL: "", // p.ej. "https://script.google.com/macros/s/AKfy.../exec"
-};
 
 /* ---------------------------------------------------------------------------
    PALETA / ESTILOS
@@ -191,6 +189,61 @@ function makeApi(getUrl) {
 }
 
 /* ---------------------------------------------------------------------------
+   PERSISTENCIA LOCAL (offline-first)
+   Los datos se guardan en localStorage (sobreviven a recarga y a estar sin red)
+   y las escrituras pendientes se acumulan en un "outbox" que se vuelca al backend
+   cuando hay conexión. El backend deduplica por `id`, así que reenviar la cola es
+   idempotente (no duplica filas).
+--------------------------------------------------------------------------- */
+const LS = {
+  url: "estupefarma.appsScriptUrl",
+  outbox: "estupefarma.outbox",
+  data: (sheet) => `estupefarma.data.${sheet}`,
+};
+function lsGet(key, fallback) {
+  try { const v = localStorage.getItem(key); return v == null ? fallback : JSON.parse(v); }
+  catch { return fallback; }
+}
+function lsSet(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch { /* cuota/privado */ } }
+function lsDel(key) { try { localStorage.removeItem(key); } catch { /* noop */ } }
+
+// URL inicial: localStorage → variable de entorno (Vercel) → ""
+function resolveInitialUrl() {
+  const stored = lsGet(LS.url, null);
+  if (stored) return stored;
+  return (import.meta.env && import.meta.env.VITE_APPS_SCRIPT_URL) || "";
+}
+function isOffline() { return typeof navigator !== "undefined" && navigator.onLine === false; }
+
+// Cola de escrituras pendientes (outbox)
+function outboxRead() { return lsGet(LS.outbox, []); }
+function outboxWrite(ops) { lsSet(LS.outbox, ops); }
+function outboxAdd(op) { const ops = outboxRead(); ops.push({ opId: uid(), ts: Date.now(), ...op }); outboxWrite(ops); return ops.length; }
+// Vuelca la cola en orden FIFO. Ante error de red se detiene y conserva el resto.
+async function outboxFlush(api) {
+  if (!api.connected() || isOffline()) return outboxRead().length;
+  let ops = outboxRead();
+  while (ops.length) {
+    const op = ops[0];
+    try {
+      if (op.action === "append") await api.append(op.sheet, op.row);
+      else if (op.action === "appendMany") await api.appendMany(op.sheet, op.rows);
+      else if (op.action === "update") await api.update(op.sheet, op.id, op.row);
+      else if (op.action === "remove") await api.remove(op.sheet, op.id);
+      ops.shift(); outboxWrite(ops);
+    } catch (e) { break; } // se reintentará al recuperar conexión
+  }
+  return outboxRead().length;
+}
+
+// Normaliza una fila de la hoja "Catalogo" al shape de medicamento usado por la app
+function normalizeMed(r) {
+  const num = (v) => (v === "" || v == null ? null : Number(v));
+  const grupo = String(r.grupo || "").toUpperCase() === "IV" ? "IV" : "ORAL";
+  return { codigoV: String(r.codigoV || "").trim(), nombre: String(r.nombre || "").trim(), grupo, max: num(r.max), min: num(r.min) };
+}
+
+/* ---------------------------------------------------------------------------
    PRIMITIVAS UI
 --------------------------------------------------------------------------- */
 function Badge({ level, children }) {
@@ -285,13 +338,13 @@ const rowBg = { none: "#fff", warn: C.yellowBg, crit: C.redBg };
 /* ===========================================================================
    1) INVENTARIO SEMANAL
 =========================================================================== */
-function buildInventarioRows(grupo) {
-  return catalog(grupo).map((m) => ({ codigoV: m.codigoV, nombre: m.nombre, real: "", d07: "", maestro: "" }));
+function buildInventarioRows(meds, grupo) {
+  return meds.filter((m) => m.grupo === grupo).map((m) => ({ codigoV: m.codigoV, nombre: m.nombre, real: "", d07: "", maestro: "" }));
 }
-function InventarioSemanal({ db, onSaved, avisos }) {
+function InventarioSemanal({ onSaved, avisos, meds, medByV }) {
   const [grupo, setGrupo] = useState("ORAL");
   const [fecha, setFecha] = useState(todayISO());
-  const [rows, setRows] = useState(() => ({ ORAL: buildInventarioRows("ORAL"), IV: buildInventarioRows("IV") }));
+  const [rows, setRows] = useState(() => ({ ORAL: buildInventarioRows(meds, "ORAL"), IV: buildInventarioRows(meds, "IV") }));
   const [saving, setSaving] = useState(false);
 
   const set = (i, campo, val) => {
@@ -839,7 +892,7 @@ function estadoPedido(p) {
 }
 const estadoBadge = { Pendiente: "info", Recibido: "ok", Incidencia: "warn", "No servido": "crit" };
 
-function RegistroPedidos({ pedidos, onCreate, onUpdate }) {
+function RegistroPedidos({ pedidos, onCreate, onUpdate, meds }) {
   const [openNew, setOpenNew] = useState(false);
   const [openRecep, setOpenRecep] = useState(null);
   const [f, setF] = useState({});
@@ -899,7 +952,7 @@ function RegistroPedidos({ pedidos, onCreate, onUpdate }) {
         <Field label="Estupefaciente (Código V + nombre)">
           <select style={inputStyle} value={f.estupefaciente || ""} onChange={(e) => setF({ ...f, estupefaciente: e.target.value })}>
             <option value="">— Seleccionar —</option>
-            {ALL_MEDS.map((m) => <option key={m.codigoV} value={`${m.codigoV} · ${m.nombre}`}>{m.codigoV} · {m.nombre}</option>)}
+            {meds.map((m) => <option key={m.codigoV} value={`${m.codigoV} · ${m.nombre}`}>{m.codigoV} · {m.nombre}</option>)}
           </select>
         </Field>
         <Field label="Fecha de pedido"><input type="date" style={inputStyle} value={f.fechaPedido || todayISO()} onChange={(e) => setF({ ...f, fechaPedido: e.target.value })} /></Field>
@@ -986,7 +1039,7 @@ function Caducados({ caducados, onCreate }) {
 /* ===========================================================================
    6) REGISTRO DE INCIDENCIAS
 =========================================================================== */
-function Incidencias({ incidencias, onCreate, onUpdate, prefill, clearPrefill }) {
+function Incidencias({ incidencias, onCreate, onUpdate, prefill, clearPrefill, meds }) {
   const [open, setOpen] = useState(false);
   const [f, setF] = useState({});
 
@@ -1048,7 +1101,7 @@ function Incidencias({ incidencias, onCreate, onUpdate, prefill, clearPrefill })
         </div>
         <Field label="Medicamento comprometido (Código V + nombre)">
           <select style={inputStyle} value={f.medicamento || ""} onChange={(e) => setF({ ...f, medicamento: e.target.value })}>
-            <option value="">—</option>{ALL_MEDS.map((m) => <option key={m.codigoV} value={`${m.codigoV} · ${m.nombre}`}>{m.codigoV} · {m.nombre}</option>)}
+            <option value="">—</option>{meds.map((m) => <option key={m.codigoV} value={`${m.codigoV} · ${m.nombre}`}>{m.codigoV} · {m.nombre}</option>)}
           </select>
         </Field>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
@@ -1159,73 +1212,102 @@ const NAV = [
 
 export default function App() {
   const [view, setView] = useState("inicio");
-  const [url, setUrl] = useState(CONFIG.APPS_SCRIPT_URL);
+  const [url, setUrl] = useState(resolveInitialUrl);
   const urlRef = useRef(url); urlRef.current = url;
   const api = useMemo(() => makeApi(() => urlRef.current), []);
   const [openSettings, setOpenSettings] = useState(false);
   const [toast, setToast] = useState(null);
   const [syncing, setSyncing] = useState(false);
+  const [pendientes, setPendientes] = useState(() => outboxRead().length);
 
-  // Estados de datos
-  const [inventarios, setInventarios] = useState([]);
-  const [pedidos, setPedidos] = useState([]);
-  const [caducados, setCaducados] = useState([]);
-  const [incidencias, setIncidencias] = useState([]);
+  // Estados de datos — inicializados desde localStorage (sobreviven a recarga / sin red)
+  const [inventarios, setInventarios] = useState(() => lsGet(LS.data("Inventarios"), []));
+  const [pedidos, setPedidos] = useState(() => lsGet(LS.data("Pedidos"), []));
+  const [caducados, setCaducados] = useState(() => lsGet(LS.data("Caducados"), []));
+  const [incidencias, setIncidencias] = useState(() => lsGet(LS.data("Incidencias"), []));
+  const [meds, setMeds] = useState(() => lsGet(LS.data("Catalogo"), ALL_MEDS));
   const [resumenAlertas, setResumenAlertas] = useState(null);
   const [avisosRepo, setAvisosRepo] = useState([]);
   const [incPrefill, setIncPrefill] = useState(null);
 
+  const medByV = useMemo(() => Object.fromEntries(meds.map((m) => [m.codigoV, m])), [meds]);
+
   const notify = (msg, tone = "ok") => { setToast({ msg, tone }); setTimeout(() => setToast(null), 3200); };
 
-  // Carga inicial desde Sheets
+  // Persistir cada dataset en localStorage cuando cambie
+  useEffect(() => { lsSet(LS.data("Inventarios"), inventarios); }, [inventarios]);
+  useEffect(() => { lsSet(LS.data("Pedidos"), pedidos); }, [pedidos]);
+  useEffect(() => { lsSet(LS.data("Caducados"), caducados); }, [caducados]);
+  useEffect(() => { lsSet(LS.data("Incidencias"), incidencias); }, [incidencias]);
+  useEffect(() => { lsSet(LS.data("Catalogo"), meds); }, [meds]);
+
+  // Vuelca la cola de escrituras pendientes al backend (idempotente por id)
+  const flush = async () => { const restantes = await outboxFlush(api); setPendientes(restantes); return restantes; };
+
+  // Carga desde Sheets (incluye el catálogo de medicamentos de la hoja "Catalogo")
   const cargar = async () => {
     if (!urlRef.current) return;
     setSyncing(true);
     try {
+      await flush(); // primero sube lo pendiente para no pisarlo con la lectura
       const [inv, ped, cad, inc] = await Promise.all([
         api.list("Inventarios"), api.list("Pedidos"), api.list("Caducados"), api.list("Incidencias"),
       ]);
       setInventarios(inv.rows || []); setPedidos(ped.rows || []); setCaducados(cad.rows || []);
       setIncidencias(inc.rows || []);
+      // El catálogo se lee aparte: si el backend aún no tiene la hoja, no debe romper el resto
+      try {
+        const cat = await api.list("Catalogo");
+        if (cat && cat.rows && cat.rows.length) setMeds(cat.rows.map(normalizeMed)); // hoja vacía → se mantiene la semilla
+      } catch (e2) { /* backend sin hoja Catalogo: se usa la semilla local */ }
       notify("Datos cargados desde Google Sheets");
-    } catch (e) { notify("Sin conexión a Sheets — modo local", "warn"); }
+    } catch (e) { notify("Sin conexión a Sheets — trabajando en local", "warn"); }
     setSyncing(false);
   };
   useEffect(() => { cargar(); /* eslint-disable-next-line */ }, []);
 
-  // Helpers persistencia (Sheets si hay URL; siempre en memoria)
-  const persistAppend = async (sheet, row) => { if (api.connected()) { try { await api.append(sheet, row); } catch (e) { notify("Guardado local (Sheets no disponible)", "warn"); } } };
-  const persistUpdate = async (sheet, row) => { if (api.connected()) { try { await api.update(sheet, row.id, row); } catch (e) { notify("Actualizado local (Sheets no disponible)", "warn"); } } };
+  // Reintentar la cola automáticamente al recuperar conexión
+  useEffect(() => {
+    const onOnline = () => { flush().then((n) => { if (n === 0) notify("Sincronizado con Google Sheets"); }); cargar(); };
+    window.addEventListener("online", onOnline);
+    return () => window.removeEventListener("online", onOnline);
+    // eslint-disable-next-line
+  }, []);
 
-  // Inventario
+  // Encola una escritura (persistida en el outbox) y la intenta enviar ya si hay conexión
+  const enqueue = async (op) => { const n = outboxAdd(op); setPendientes(n); return flush(); };
+
+  // Sufijo de aviso cuando la escritura queda pendiente de sincronizar
+  const pendSuffix = () => (!api.connected() || isOffline()) ? " · pendiente de sincronizar" : "";
+
+  // Inventario (una escritura por lotes a la pestaña Inventarios)
   const guardarInventario = async ({ filas }) => {
     setInventarios((prev) => [...prev, ...filas]);
-    for (const f of filas) await persistAppend("Inventarios", f);
+    await enqueue({ action: "appendMany", sheet: "Inventarios", rows: filas });
     // Avisos de reposición
     const avisos = [];
     filas.forEach((f) => { const sl = stockLevel(f.real, medByV[f.codigoV]); if (sl && (sl.level === "warn" || sl.level === "crit")) avisos.push({ codigoV: f.codigoV, nombre: f.nombre, accion: sl.txt, real: f.real, level: sl.level }); });
     setAvisosRepo(avisos);
-    notify(`Inventario guardado (${filas.length} líneas)${avisos.length ? ` · ${avisos.length} avisos de reposición` : ""}`);
+    notify(`Inventario guardado (${filas.length} líneas)${avisos.length ? ` · ${avisos.length} avisos de reposición` : ""}${pendSuffix()}`);
   };
 
   // Pedidos
-  const crearPedido = async (p) => { setPedidos((prev) => [p, ...prev]); await persistAppend("Pedidos", p); notify("Pedido creado"); };
-  const actualizarPedido = async (p) => { setPedidos((prev) => prev.map((x) => x.id === p.id ? p : x)); await persistUpdate("Pedidos", p); if (p.avisoLlegada && estadoPedido(p) === "Pendiente") notify("Aviso de llegada registrado — notificado al supervisor"); else notify("Pedido actualizado"); };
+  const crearPedido = async (p) => { setPedidos((prev) => [p, ...prev]); await enqueue({ action: "append", sheet: "Pedidos", row: p }); notify("Pedido creado" + pendSuffix()); };
+  const actualizarPedido = async (p) => { setPedidos((prev) => prev.map((x) => x.id === p.id ? p : x)); await enqueue({ action: "update", sheet: "Pedidos", id: p.id, row: p }); if (p.avisoLlegada && estadoPedido(p) === "Pendiente") notify("Aviso de llegada registrado — notificado al supervisor"); else notify("Pedido actualizado" + pendSuffix()); };
 
   // Caducados
-  const crearCaducado = async (c) => { setCaducados((prev) => [c, ...prev]); await persistAppend("Caducados", c); notify("Caducado registrado"); };
+  const crearCaducado = async (c) => { setCaducados((prev) => [c, ...prev]); await enqueue({ action: "append", sheet: "Caducados", row: c }); notify("Caducado registrado" + pendSuffix()); };
 
   // Incidencias
-  const crearIncidencia = async (i) => { setIncidencias((prev) => [i, ...prev]); await persistAppend("Incidencias", i); notify("Incidencia registrada"); };
-  const actualizarIncidencia = async (i) => { setIncidencias((prev) => prev.map((x) => x.id === i.id ? i : x)); await persistUpdate("Incidencias", i); notify("Incidencia actualizada"); };
+  const crearIncidencia = async (i) => { setIncidencias((prev) => [i, ...prev]); await enqueue({ action: "append", sheet: "Incidencias", row: i }); notify("Incidencia registrada" + pendSuffix()); };
+  const actualizarIncidencia = async (i) => { setIncidencias((prev) => prev.map((x) => x.id === i.id ? i : x)); await enqueue({ action: "update", sheet: "Incidencias", id: i.id, row: i }); notify("Incidencia actualizada" + pendSuffix()); };
 
   // Resumen ligero del último análisis del Detector (solo recuento, sin checklist)
   const registrarResumenAlertas = (r) => { setResumenAlertas(r); if (r.criticas > 0) notify(`Detector: ${r.criticas} alertas críticas en el último análisis`, "warn"); };
-  // Guarda la tabla completa del cruce en la pestaña "Cruces" (una sola escritura por lotes)
+  // Guarda la tabla completa del cruce en la pestaña "Cruces" (por lotes, vía cola offline-first)
   const guardarCruce = async (rows) => {
-    if (!api.connected()) { notify("Sin conexión a Sheets — configura la URL para guardar el cruce", "warn"); return; }
-    try { const r = await api.appendMany("Cruces", rows); notify(`Cruce guardado en Sheets (${r.added != null ? r.added : rows.length} filas)`); }
-    catch (e) { notify("No se pudo guardar el cruce: " + e.message, "crit"); }
+    await enqueue({ action: "appendMany", sheet: "Cruces", rows });
+    notify(`Cruce guardado (${rows.length} filas)${pendSuffix()}`);
   };
 
   const connected = api.connected();
@@ -1254,6 +1336,11 @@ export default function App() {
           <button onClick={() => setOpenSettings(true)} style={{ width: "100%", display: "flex", gap: 8, alignItems: "center", justifyContent: "center", padding: "9px", borderRadius: 10, border: "1px solid rgba(255,255,255,0.2)", background: "transparent", color: "#fff", cursor: "pointer", fontSize: 13, fontWeight: 600 }}>
             {connected ? <Cloud size={15} /> : <CloudOff size={15} />} {connected ? "Sheets conectado" : "Configurar Sheets"}
           </button>
+          {pendientes > 0 && (
+            <div style={{ marginTop: 8, fontSize: 11, color: "#FCD34D", textAlign: "center", display: "flex", gap: 5, alignItems: "center", justifyContent: "center" }}>
+              <RefreshCw size={12} /> {pendientes} cambio{pendientes > 1 ? "s" : ""} sin sincronizar
+            </div>
+          )}
         </div>
       </aside>
 
@@ -1261,26 +1348,26 @@ export default function App() {
       <main style={{ flex: 1, overflowY: "auto", padding: "26px 30px" }}>
         {!connected && (
           <div style={{ background: C.yellowBg, border: `1px solid ${C.yellow}`, color: "#854d0e", borderRadius: 12, padding: "10px 14px", marginBottom: 18, fontSize: 13, display: "flex", gap: 8, alignItems: "center" }}>
-            <CloudOff size={16} /> Modo local: los datos viven solo en esta sesión. Configura la URL del Web App de Google Apps Script para persistir en Google Sheets.
+            <CloudOff size={16} /> Modo local: los datos se guardan en este equipo y se sincronizarán con Google Sheets al configurar la URL del Web App (botón «Configurar Sheets»).
           </div>
         )}
         {view === "inicio" && <Inicio inventarios={inventarios} pedidos={pedidos} resumenAlertas={resumenAlertas} avisosRepo={avisosRepo} goTo={setView} />}
-        {view === "inventario" && <InventarioSemanal onSaved={guardarInventario} avisos={avisosRepo} />}
+        {view === "inventario" && <InventarioSemanal onSaved={guardarInventario} avisos={avisosRepo} meds={meds} medByV={medByV} />}
         {view === "anteriores" && <InventariosAnteriores inventarios={inventarios} />}
         {view === "detector" && <DetectorAlertas onResumen={registrarResumenAlertas} onGuardarCruce={guardarCruce} sheetsConnected={connected} onNombrePaciente={() => notify("⚠️ Posible nombre de paciente detectado y excluido del procesamiento", "crit")} />}
-        {view === "pedidos" && <RegistroPedidos pedidos={pedidos} onCreate={crearPedido} onUpdate={actualizarPedido} />}
+        {view === "pedidos" && <RegistroPedidos pedidos={pedidos} onCreate={crearPedido} onUpdate={actualizarPedido} meds={meds} />}
         {view === "caducados" && <Caducados caducados={caducados} onCreate={crearCaducado} />}
-        {view === "incidencias" && <Incidencias incidencias={incidencias} onCreate={crearIncidencia} onUpdate={actualizarIncidencia} prefill={incPrefill} clearPrefill={() => setIncPrefill(null)} />}
+        {view === "incidencias" && <Incidencias incidencias={incidencias} onCreate={crearIncidencia} onUpdate={actualizarIncidencia} prefill={incPrefill} clearPrefill={() => setIncPrefill(null)} meds={meds} />}
       </main>
 
       {/* AJUSTES */}
       <Drawer open={openSettings} title="Conexión con Google Sheets" onClose={() => setOpenSettings(false)}
-        footer={<><button style={btnGhost} onClick={() => setOpenSettings(false)}>Cerrar</button><button style={btnPrimary} onClick={async () => { setOpenSettings(false); await cargar(); }}><RefreshCw size={15} /> Guardar y sincronizar</button></>}>
-        <p style={{ fontSize: 13, color: C.sub, marginTop: 0 }}>Pega la URL del <b>Web App</b> generada al desplegar el Apps Script (<code>Code.gs</code>). Cada funcionalidad se guarda en su propia pestaña del Google Sheets.</p>
+        footer={<><button style={btnGhost} onClick={() => setOpenSettings(false)}>Cerrar</button><button style={btnPrimary} onClick={async () => { const u = (url || "").trim(); if (u) lsSet(LS.url, u); else lsDel(LS.url); setUrl(u); setOpenSettings(false); await cargar(); }}><RefreshCw size={15} /> Guardar y sincronizar</button></>}>
+        <p style={{ fontSize: 13, color: C.sub, marginTop: 0 }}>Pega la URL del <b>Web App</b> generada al desplegar el Apps Script (<code>Code.gs</code>). Se guarda en este equipo, así que <b>no hay que volver a introducirla</b>. Cada funcionalidad se guarda en su propia pestaña del Google Sheets.</p>
         <Field label="URL del Web App (…/exec)"><input style={inputStyle} value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://script.google.com/macros/s/…/exec" /></Field>
-        <div style={{ marginTop: 12, fontSize: 12, color: C.sub }}>Estado: {connected ? <Badge level="ok">Conectado</Badge> : <Badge level="warn">Modo local</Badge>} {syncing && "· sincronizando…"}</div>
+        <div style={{ marginTop: 12, fontSize: 12, color: C.sub }}>Estado: {connected ? <Badge level="ok">Conectado</Badge> : <Badge level="warn">Modo local</Badge>} {syncing && "· sincronizando…"} {pendientes > 0 && <Badge level="warn">{pendientes} sin sincronizar</Badge>}</div>
         <div style={{ marginTop: 16, background: "#F3F4F6", borderRadius: 10, padding: 12, fontSize: 12, color: C.text }}>
-          Pestañas creadas: <b>Inventarios, Pedidos, Caducados, Incidencias, Alertas</b>. Ninguna almacena nombres de paciente.
+          Pestañas: <b>Inventarios, Pedidos, Caducados, Incidencias, Cruces, Catalogo</b>. Ninguna almacena nombres de paciente. Si defines <code>VITE_APPS_SCRIPT_URL</code> en Vercel, la URL viene ya configurada por defecto.
         </div>
       </Drawer>
 
