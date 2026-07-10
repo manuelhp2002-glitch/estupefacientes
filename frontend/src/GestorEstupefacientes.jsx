@@ -4,7 +4,7 @@ import {
   Home, ClipboardList, History, ShieldAlert, PackageSearch, CalendarX,
   AlertTriangle, Plus, Save, X, Upload, Search, CheckCircle2, Clock,
   Settings, RefreshCw, Cloud, CloudOff, Truck, FileSpreadsheet, Trash2,
-  ChevronRight, Info, Pill, Syringe, Filter, ArrowRight, ListChecks, Bell
+  ChevronRight, Info, Pill, Syringe, Filter, ArrowRight, ListChecks, Bell, Menu
 } from "lucide-react";
 
 /* ============================================================================
@@ -220,6 +220,20 @@ function resolveInitialUrl() {
 }
 function isOffline() { return typeof navigator !== "undefined" && navigator.onLine === false; }
 
+// Hook responsive: true cuando el viewport es de móvil/tablet estrecho
+function useIsMobile(bp = 860) {
+  const query = `(max-width:${bp}px)`;
+  const [m, setM] = useState(() => typeof window !== "undefined" && window.matchMedia(query).matches);
+  useEffect(() => {
+    const mq = window.matchMedia(query);
+    const on = (e) => setM(e.matches);
+    setM(mq.matches);
+    if (mq.addEventListener) mq.addEventListener("change", on); else mq.addListener(on);
+    return () => { if (mq.removeEventListener) mq.removeEventListener("change", on); else mq.removeListener(on); };
+  }, [query]);
+  return m;
+}
+
 // Cola de escrituras pendientes (outbox)
 function outboxRead() { return lsGet(LS.outbox, []); }
 function outboxWrite(ops) { lsSet(LS.outbox, ops); }
@@ -332,7 +346,7 @@ function Card({ children, style }) {
 function StatCard({ icon, label, value, sub, tone }) {
   const tones = { crit: C.red, warn: C.yellow, ok: C.green, info: C.accent };
   return (
-    <Card style={{ flex: 1, minWidth: 190 }}>
+    <Card style={{ flex: 1, minWidth: 150 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, color: tones[tone] || C.accent }}>
         {icon}<span style={{ fontSize: 13, fontWeight: 600, color: C.sub }}>{label}</span>
       </div>
@@ -1113,7 +1127,7 @@ function Incidencias({ incidencias, onCreate, onUpdate, prefill, clearPrefill, m
         return (
           <div key={g} style={{ marginBottom: 18 }}>
             <div style={{ fontWeight: 700, color: C.sub, fontSize: 13, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.5 }}>{g} ({items.length})</div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(320px,1fr))", gap: 12 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(250px,1fr))", gap: 12 }}>
               {items.map((i) => (
                 <Card key={i.id} style={{ cursor: "pointer" }} >
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
@@ -1134,7 +1148,7 @@ function Incidencias({ incidencias, onCreate, onUpdate, prefill, clearPrefill, m
 
       <Drawer open={open} wide title={f.id ? "Editar incidencia" : "Nueva incidencia"} onClose={() => { setOpen(false); if (clearPrefill) clearPrefill(); }}
         footer={<><button style={btnGhost} onClick={() => { setOpen(false); if (clearPrefill) clearPrefill(); }}>Cancelar</button><button style={btnPrimary} onClick={guardar}><Save size={15} /> Guardar</button></>}>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
           <Field label="Tipo de incidencia"><select style={inputStyle} value={f.tipo || ""} onChange={(e) => setF({ ...f, tipo: e.target.value })}><option value="">—</option>{TIPOS_INCIDENCIA.map((t) => <option key={t}>{t}</option>)}</select></Field>
           <Field label="Sistema involucrado"><select style={inputStyle} value={f.sistema || ""} onChange={(e) => setF({ ...f, sistema: e.target.value })}><option value="">—</option>{SISTEMAS.map((s) => <option key={s}>{s}</option>)}</select></Field>
         </div>
@@ -1143,14 +1157,14 @@ function Incidencias({ incidencias, onCreate, onUpdate, prefill, clearPrefill, m
             <option value="">—</option>{meds.map((m) => <option key={m.codigoV} value={`${m.codigoV} · ${m.nombre}`}>{m.codigoV} · {m.nombre}</option>)}
           </select>
         </Field>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
           <Field label="Fecha y hora"><input type="datetime-local" style={inputStyle} value={f.fechaHora || ""} onChange={(e) => setF({ ...f, fechaHora: e.target.value })} /></Field>
           <Field label="Cantidad afectada"><input type="number" style={inputStyle} value={f.cantidad || ""} onChange={(e) => setF({ ...f, cantidad: e.target.value })} /></Field>
         </div>
         <Field label="Movimiento registrado (lo que apareció en el sistema)"><input style={inputStyle} value={f.movimiento || ""} onChange={(e) => setF({ ...f, movimiento: e.target.value })} /></Field>
         <Field label="Descripción del problema"><textarea style={{ ...inputStyle, minHeight: 70 }} value={f.descripcion || ""} onChange={(e) => setF({ ...f, descripcion: e.target.value })} /></Field>
         <Field label="Medida correctiva adoptada (puede rellenarse después)"><textarea style={{ ...inputStyle, minHeight: 70 }} value={f.medida || ""} onChange={(e) => setF({ ...f, medida: e.target.value })} /></Field>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
           <Field label="Estado"><select style={inputStyle} value={f.estado || "Pendiente"} onChange={(e) => setF({ ...f, estado: e.target.value })}>{["Pendiente", "En revisión", "Resuelta"].map((s) => <option key={s}>{s}</option>)}</select></Field>
           <Field label="Farmacéutico que registra"><input style={inputStyle} value={f.farmaceutico || ""} onChange={(e) => setF({ ...f, farmaceutico: e.target.value })} /></Field>
         </div>
@@ -1184,7 +1198,7 @@ function Inicio({ inventarios, pedidos, resumenAlertas, avisosRepo, goTo }) {
         <StatCard icon={<PackageSearch size={18} />} label="Pedidos pendientes" value={pendPedidos} tone={pendPedidos ? "warn" : "ok"} />
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, alignItems: "start" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 16, alignItems: "start" }}>
         <Card>
           <div style={{ fontWeight: 700, color: C.text, display: "flex", gap: 8, alignItems: "center" }}><ShieldAlert size={17} /> Detector de alertas
             {resumenAlertas && resumenAlertas.fecha && <span style={{ marginLeft: "auto" }}><Badge level={resumenAlertas.criticas ? "crit" : "ok"}>{resumenAlertas.criticas} críticas</Badge></span>}
@@ -1337,6 +1351,8 @@ const NAV = [
 
 export default function App() {
   const [view, setView] = useState("inicio");
+  const isMobile = useIsMobile();
+  const [menuOpen, setMenuOpen] = useState(false);
   const [url, setUrl] = useState(resolveInitialUrl);
   const urlRef = useRef(url); urlRef.current = url;
   const api = useMemo(() => makeApi(() => urlRef.current), []);
@@ -1471,16 +1487,34 @@ export default function App() {
   const alertasPend = alertas.filter((a) => a.estado === "pendiente").length;
 
   return (
-    <div style={{ display: "flex", height: "100vh", fontFamily: "'Segoe UI', system-ui, sans-serif", background: C.bg, color: C.text }}>
-      {/* SIDEBAR */}
-      <aside style={{ ...dotPattern, width: 240, color: "#fff", display: "flex", flexDirection: "column", flexShrink: 0 }}>
-        <div style={{ padding: "22px 20px 16px" }}>
-          <div style={{ fontSize: 18, fontWeight: 800, letterSpacing: -0.3 }}>Gestor de Estupefacientes</div>
-          <div style={{ fontSize: 11, opacity: 0.7, marginTop: 3 }}>Servicio de Farmacia · HUNSC</div>
+    <div style={{ display: "flex", flexDirection: isMobile ? "column" : "row", height: "100vh", fontFamily: "'Segoe UI', system-ui, sans-serif", background: C.bg, color: C.text }}>
+      {/* BARRA SUPERIOR (solo móvil) */}
+      {isMobile && (
+        <header style={{ ...dotPattern, color: "#fff", display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", flexShrink: 0 }}>
+          <button onClick={() => setMenuOpen(true)} aria-label="Abrir menú" style={{ background: "transparent", border: "none", color: "#fff", cursor: "pointer", padding: 6, display: "inline-flex" }}><Menu size={22} /></button>
+          <div style={{ fontSize: 15, fontWeight: 800 }}>EstupeFarma</div>
+          {alertasPend > 0 && <span style={{ background: C.accent, borderRadius: 999, fontSize: 11, padding: "1px 8px" }}>{alertasPend}</span>}
+          <button onClick={() => setOpenSettings(true)} aria-label="Ajustes" style={{ marginLeft: "auto", background: "transparent", border: "none", color: "#fff", cursor: "pointer", padding: 6, display: "inline-flex" }}>{connected ? <Cloud size={18} /> : <CloudOff size={18} />}</button>
+        </header>
+      )}
+
+      {/* Fondo oscuro del menú (móvil) */}
+      {isMobile && menuOpen && <div onClick={() => setMenuOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(15,15,40,0.45)", zIndex: 40 }} />}
+
+      {/* SIDEBAR (estática en PC, off-canvas en móvil) */}
+      {(!isMobile || menuOpen) && (
+      <aside style={{ ...dotPattern, width: 240, color: "#fff", display: "flex", flexDirection: "column", flexShrink: 0,
+        ...(isMobile ? { position: "fixed", top: 0, left: 0, height: "100%", zIndex: 41, boxShadow: "4px 0 24px rgba(0,0,0,0.35)", maxWidth: "82vw" } : {}) }}>
+        <div style={{ padding: "22px 20px 16px", display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+          <div>
+            <div style={{ fontSize: 18, fontWeight: 800, letterSpacing: -0.3 }}>Gestor de Estupefacientes</div>
+            <div style={{ fontSize: 11, opacity: 0.7, marginTop: 3 }}>Servicio de Farmacia · HUNSC</div>
+          </div>
+          {isMobile && <button onClick={() => setMenuOpen(false)} aria-label="Cerrar menú" style={{ background: "transparent", border: "none", color: "#fff", cursor: "pointer", padding: 4, display: "inline-flex" }}><X size={20} /></button>}
         </div>
-        <nav style={{ flex: 1, padding: "6px 12px" }}>
+        <nav style={{ flex: 1, padding: "6px 12px", overflowY: "auto" }}>
           {NAV.map(([id, label, Icon]) => (
-            <button key={id} onClick={() => setView(id)} style={{
+            <button key={id} onClick={() => { setView(id); setMenuOpen(false); }} style={{
               width: "100%", display: "flex", gap: 11, alignItems: "center", padding: "10px 12px", marginBottom: 4,
               borderRadius: 10, border: "none", cursor: "pointer", fontSize: 14, fontWeight: 600, textAlign: "left",
               background: view === id ? "rgba(255,255,255,0.14)" : "transparent", color: view === id ? "#fff" : "rgba(255,255,255,0.72)",
@@ -1502,9 +1536,10 @@ export default function App() {
           )}
         </div>
       </aside>
+      )}
 
       {/* CONTENIDO */}
-      <main style={{ flex: 1, overflowY: "auto", padding: "26px 30px" }}>
+      <main style={{ flex: 1, overflowY: "auto", padding: isMobile ? "16px 14px" : "26px 30px", minWidth: 0 }}>
         {!connected && (
           <div style={{ background: C.yellowBg, border: `1px solid ${C.yellow}`, color: "#854d0e", borderRadius: 12, padding: "10px 14px", marginBottom: 18, fontSize: 13, display: "flex", gap: 8, alignItems: "center" }}>
             <CloudOff size={16} /> Modo local: los datos se guardan en este equipo y se sincronizarán con Google Sheets al configurar la URL del Web App (botón «Configurar Sheets»).
