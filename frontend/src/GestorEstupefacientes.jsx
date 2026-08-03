@@ -336,6 +336,10 @@ const btnPrimary = { background: C.accent, color: "#fff", border: "none", paddin
 const btnGhost = { background: "#fff", color: C.text, border: `1px solid ${C.border}`, padding: "9px 16px", borderRadius: 10, fontWeight: 600, cursor: "pointer", display: "inline-flex", gap: 8, alignItems: "center", fontSize: 14 };
 const inputStyle = { width: "100%", padding: "9px 11px", border: `1px solid ${C.border}`, borderRadius: 9, fontSize: 14, boxSizing: "border-box", color: C.text, background: "#fff" };
 const labelStyle = { fontSize: 13, fontWeight: 600, color: C.sub, display: "block", marginBottom: 6, marginTop: 14 };
+// Estilo de campo con borde rojo cuando falta un obligatorio (#19)
+const reqStyle = (missing) => ({ ...inputStyle, borderColor: missing ? C.red : C.border });
+// Aviso de error dentro de un drawer cuando el guardado falla (#18)
+const errBox = { background: C.redBg, color: C.red, borderRadius: 8, padding: "8px 10px", fontSize: 13, marginBottom: 8 };
 
 function Field({ label, children }) {
   return (<div><label style={labelStyle}>{label}</label>{children}</div>);
@@ -900,7 +904,7 @@ function DetectorAlertas({ onResumen, onGuardarCruce, sheetsConnected, onNombreP
                     <tr key={r.id} style={{ background: rowBg[r.nivel] }}>
                       <td style={{ ...td, minWidth: 210 }}>{r.medicamento}{r.cruce !== "ambos" && <span style={{ marginLeft: 6, fontSize: 11, color: C.sub }}>({r.cruce})</span>}</td>
                       <td style={{ ...td, fontFamily: "monospace", fontSize: 12 }}>{r.codigoV || "—"}</td>
-                      <td style={{ ...td, whiteSpace: "nowrap" }}>{r.fechaTxt || r.day || "—"}</td>
+                      <td style={{ ...td, whiteSpace: "nowrap" }}>{r.fechaTxt || (r.day ? fmtDate(r.day) : "—")}</td>
                       <td style={td}>{r.tipo || "—"}</td>
                       <td style={td}>{r.medico || "—"}</td>
                       <td style={td}>{r.cantidad}</td>
@@ -946,25 +950,46 @@ function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, prefill, clearPref
   const [openRecep, setOpenRecep] = useState(null);
   const [f, setF] = useState({});
   const [r, setR] = useState({});
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
 
+  // Abre "Nuevo pedido" con la fecha sembrada (obligatoria) y prefill opcional
+  const abrirNuevo = (base) => { setErr(""); setF({ fechaPedido: todayISO(), ...(base || {}) }); setOpenNew(true); };
   // Prefill desde una alerta de reposición: abre el drawer con el medicamento cargado
-  useEffect(() => { if (prefill) { setF({ ...prefill }); setOpenNew(true); } }, [prefill]);
+  useEffect(() => { if (prefill) abrirNuevo(prefill); /* eslint-disable-next-line */ }, [prefill]);
 
-  const cerrarNuevo = () => { setOpenNew(false); setF({}); if (clearPrefill) clearPrefill(); };
+  const cerrarNuevo = () => { setOpenNew(false); setF({}); setErr(""); if (clearPrefill) clearPrefill(); };
+  const cerrarRecep = () => { setOpenRecep(null); setR({}); setErr(""); };
+
+  const validNuevo = !!(f.vale && f.vale.trim() && f.estupefaciente && Number(f.udsPedidas) > 0 && f.proveedor && f.fechaPedido);
   const crear = async () => {
-    const nuevo = { id: uid(), ...f, uds: f.udsPedidas, estado: "Pendiente", noServido: false, avisoLlegada: false };
-    await onCreate(nuevo); cerrarNuevo();
+    if (!validNuevo || saving) return;
+    setSaving(true); setErr("");
+    try {
+      await onCreate({ id: uid(), ...f, uds: f.udsPedidas, estado: "Pendiente", noServido: false, avisoLlegada: false });
+      cerrarNuevo();
+    } catch (e) { setErr("No se pudo guardar el pedido: " + (e && e.message ? e.message : e)); }
+    finally { setSaving(false); }
   };
+
+  const validRecep = r.noServido
+    ? !!(r.incidencias && r.incidencias.trim())
+    : !!(r.fechaEntrada && r.udsRecibidas !== "" && r.udsRecibidas != null && r.farmaceutico && r.farmaceutico.trim());
   const recepcionar = async () => {
-    const upd = { ...openRecep, ...r, noServido: !!r.noServido };
-    upd.estado = estadoPedido(upd);
-    await onUpdate(upd); setOpenRecep(null); setR({});
+    if (!validRecep || saving) return;
+    setSaving(true); setErr("");
+    try {
+      const upd = { ...openRecep, ...r, noServido: !!r.noServido };
+      upd.estado = estadoPedido(upd);
+      await onUpdate(upd); cerrarRecep();
+    } catch (e) { setErr("No se pudo guardar la recepción: " + (e && e.message ? e.message : e)); }
+    finally { setSaving(false); }
   };
   const avisar = async (p) => { await onUpdate({ ...p, avisoLlegada: true, horaAviso: new Date().toISOString() }); };
 
   return (
     <div>
-      <SectionTitle title="Registro de pedidos" desc="Sustituye el Excel de seguimiento de pedidos a proveedor." right={<button style={btnPrimary} onClick={() => setOpenNew(true)}><Plus size={16} /> Nuevo pedido</button>} />
+      <SectionTitle title="Registro de pedidos" desc="Sustituye el Excel de seguimiento de pedidos a proveedor." right={<button style={btnPrimary} onClick={() => abrirNuevo()}><Plus size={16} /> Nuevo pedido</button>} />
       <Card style={{ padding: 0, overflow: "hidden" }}>
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 900 }}>
@@ -985,9 +1010,9 @@ function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, prefill, clearPref
                       {est === "Pendiente" ? (
                         <div style={{ display: "flex", gap: 6 }}>
                           {!p.avisoLlegada && <button style={microBtn} onClick={() => avisar(p)}><Truck size={13} /> Avisar llegada</button>}
-                          <button style={{ ...microBtn, background: C.accent, color: "#fff", border: "none" }} onClick={() => { setOpenRecep(p); setR({ fechaEntrada: todayISO(), udsRecibidas: p.udsPedidas }); }}>Recepcionar</button>
+                          <button style={{ ...microBtn, background: C.accent, color: "#fff", border: "none" }} onClick={() => { setErr(""); setOpenRecep(p); setR({ fechaEntrada: todayISO(), udsRecibidas: p.udsPedidas }); }}>Recepcionar</button>
                         </div>
-                      ) : <button style={microBtn} onClick={() => { setOpenRecep(p); setR({ fechaEntrada: p.fechaEntrada || todayISO(), udsRecibidas: p.udsRecibidas ?? p.udsPedidas, farmaceutico: p.farmaceutico, incidencias: p.incidencias, noServido: p.noServido }); }}>Editar</button>}
+                      ) : <button style={microBtn} onClick={() => { setErr(""); setOpenRecep(p); setR({ fechaEntrada: p.fechaEntrada || todayISO(), udsRecibidas: p.udsRecibidas ?? p.udsPedidas, farmaceutico: p.farmaceutico, incidencias: p.incidencias, noServido: p.noServido }); }}>Editar</button>}
                     </td>
                   </tr>
                 );
@@ -999,19 +1024,20 @@ function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, prefill, clearPref
 
       {/* Nuevo pedido */}
       <Drawer open={openNew} title="Nuevo pedido" onClose={cerrarNuevo}
-        footer={<><button style={btnGhost} onClick={cerrarNuevo}>Cancelar</button><button style={btnPrimary} onClick={crear}><Save size={15} /> Crear</button></>}>
-        <Field label="Nº de vale"><input style={inputStyle} value={f.vale || ""} onChange={(e) => setF({ ...f, vale: e.target.value })} /></Field>
+        footer={<><button style={btnGhost} onClick={cerrarNuevo}>Cancelar</button><button style={{ ...btnPrimary, opacity: validNuevo && !saving ? 1 : 0.5 }} disabled={!validNuevo || saving} onClick={crear}><Save size={15} /> {saving ? "Guardando…" : "Crear"}</button></>}>
+        {err && <div style={errBox}>{err}</div>}
+        <Field label="Nº de vale"><input style={reqStyle(!(f.vale && f.vale.trim()))} value={f.vale || ""} onChange={(e) => setF({ ...f, vale: e.target.value })} /></Field>
         <Field label="CN (Código Nacional)"><input style={inputStyle} value={f.cn || ""} onChange={(e) => setF({ ...f, cn: e.target.value })} /></Field>
         <Field label="Estupefaciente (Código V + nombre)">
-          <select style={inputStyle} value={f.estupefaciente || ""} onChange={(e) => setF({ ...f, estupefaciente: e.target.value })}>
+          <select style={reqStyle(!f.estupefaciente)} value={f.estupefaciente || ""} onChange={(e) => setF({ ...f, estupefaciente: e.target.value })}>
             <option value="">— Seleccionar —</option>
             {meds.map((m) => <option key={m.codigoV} value={`${m.codigoV} · ${m.nombre}`}>{m.codigoV} · {m.nombre}</option>)}
           </select>
         </Field>
-        <Field label="Fecha de pedido"><input type="date" style={inputStyle} value={f.fechaPedido || todayISO()} onChange={(e) => setF({ ...f, fechaPedido: e.target.value })} /></Field>
-        <Field label="Unidades pedidas"><input type="number" style={inputStyle} value={f.udsPedidas || ""} onChange={(e) => setF({ ...f, udsPedidas: e.target.value })} /></Field>
+        <Field label="Fecha de pedido"><input type="date" style={reqStyle(!f.fechaPedido)} value={f.fechaPedido || todayISO()} onChange={(e) => setF({ ...f, fechaPedido: e.target.value })} /></Field>
+        <Field label="Unidades pedidas"><input type="number" style={reqStyle(!(Number(f.udsPedidas) > 0))} value={f.udsPedidas || ""} onChange={(e) => setF({ ...f, udsPedidas: e.target.value })} /></Field>
         <Field label="Proveedor">
-          <select style={inputStyle} value={f.proveedor || ""} onChange={(e) => setF({ ...f, proveedor: e.target.value })}>
+          <select style={reqStyle(!f.proveedor)} value={f.proveedor || ""} onChange={(e) => setF({ ...f, proveedor: e.target.value })}>
             <option value="">— Seleccionar —</option>{PROVEEDORES.map((p) => <option key={p}>{p}</option>)}
           </select>
         </Field>
@@ -1019,9 +1045,10 @@ function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, prefill, clearPref
       </Drawer>
 
       {/* Recepción */}
-      <Drawer open={!!openRecep} title="Recepción de pedido" onClose={() => setOpenRecep(null)}
-        footer={<><button style={btnGhost} onClick={() => setOpenRecep(null)}>Cancelar</button><button style={btnPrimary} onClick={recepcionar}><Save size={15} /> Guardar recepción</button></>}>
+      <Drawer open={!!openRecep} title="Recepción de pedido" onClose={cerrarRecep}
+        footer={<><button style={btnGhost} onClick={cerrarRecep}>Cancelar</button><button style={{ ...btnPrimary, opacity: validRecep && !saving ? 1 : 0.5 }} disabled={!validRecep || saving} onClick={recepcionar}><Save size={15} /> {saving ? "Guardando…" : "Guardar recepción"}</button></>}>
         {openRecep && <>
+          {err && <div style={errBox}>{err}</div>}
           <div style={{ background: "#F3F4F6", borderRadius: 10, padding: 12, fontSize: 13, color: C.text }}>
             <b>{openRecep.estupefaciente}</b><br />Vale {openRecep.vale} · {openRecep.udsPedidas} uds pedidas · {openRecep.proveedor}
           </div>
@@ -1029,12 +1056,12 @@ function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, prefill, clearPref
             <input type="checkbox" checked={!!r.noServido} onChange={(e) => setR({ ...r, noServido: e.target.checked })} /> No lo sirven / Pedido anulado
           </label>
           {!r.noServido ? <>
-            <Field label="Fecha de entrada"><input type="date" style={inputStyle} value={r.fechaEntrada || ""} onChange={(e) => setR({ ...r, fechaEntrada: e.target.value })} /></Field>
-            <Field label="Unidades recibidas"><input type="number" style={inputStyle} value={r.udsRecibidas ?? ""} onChange={(e) => setR({ ...r, udsRecibidas: e.target.value })} /></Field>
-            <Field label="Farmacéutico que recepciona"><input style={inputStyle} value={r.farmaceutico || ""} onChange={(e) => setR({ ...r, farmaceutico: e.target.value })} /></Field>
+            <Field label="Fecha de entrada"><input type="date" style={reqStyle(!r.fechaEntrada)} value={r.fechaEntrada || ""} onChange={(e) => setR({ ...r, fechaEntrada: e.target.value })} /></Field>
+            <Field label="Unidades recibidas"><input type="number" style={reqStyle(r.udsRecibidas === "" || r.udsRecibidas == null)} value={r.udsRecibidas ?? ""} onChange={(e) => setR({ ...r, udsRecibidas: e.target.value })} /></Field>
+            <Field label="Farmacéutico que recepciona"><input style={reqStyle(!(r.farmaceutico && r.farmaceutico.trim()))} value={r.farmaceutico || ""} onChange={(e) => setR({ ...r, farmaceutico: e.target.value })} /></Field>
             <Field label="Incidencias (opcional)"><textarea style={{ ...inputStyle, minHeight: 60 }} value={r.incidencias || ""} onChange={(e) => setR({ ...r, incidencias: e.target.value })} /></Field>
           </> : (
-            <Field label="Explicación de la incidencia (obligatorio)"><textarea style={{ ...inputStyle, minHeight: 80, borderColor: (r.incidencias && r.incidencias.trim()) ? C.border : C.red }} value={r.incidencias || ""} onChange={(e) => setR({ ...r, incidencias: e.target.value })} placeholder="Motivo por el que no se sirvió el pedido" /></Field>
+            <Field label="Explicación de la incidencia (obligatorio)"><textarea style={{ ...reqStyle(!(r.incidencias && r.incidencias.trim())), minHeight: 80 }} value={r.incidencias || ""} onChange={(e) => setR({ ...r, incidencias: e.target.value })} placeholder="Motivo por el que no se sirvió el pedido" /></Field>
           )}
         </>}
       </Drawer>
@@ -1051,8 +1078,19 @@ function Caducados({ caducados, onCreate }) {
   const [f, setF] = useState({});
   const [q, setQ] = useState("");
   const [d1, setD1] = useState(""); const [d2, setD2] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
 
-  const guardar = async () => { await onCreate({ id: uid(), ...f }); setOpen(false); setF({}); };
+  const abrir = () => { setErr(""); setF({}); setOpen(true); };
+  const cerrar = () => { setOpen(false); setF({}); setErr(""); };
+  const valid = !!(f.cn && f.cn.trim() && f.nombre && f.nombre.trim() && f.fechaCaducidad && Number(f.unidades) > 0);
+  const guardar = async () => {
+    if (!valid || saving) return;
+    setSaving(true); setErr("");
+    try { await onCreate({ id: uid(), ...f }); cerrar(); }
+    catch (e) { setErr("No se pudo guardar el caducado: " + (e && e.message ? e.message : e)); }
+    finally { setSaving(false); }
+  };
   const list = caducados
     .filter((c) => !q || (c.nombre || "").toLowerCase().includes(q.toLowerCase()) || (c.cn || "").includes(q))
     .filter((c) => (!d1 || c.fechaCaducidad >= d1) && (!d2 || c.fechaCaducidad <= d2))
@@ -1060,7 +1098,7 @@ function Caducados({ caducados, onCreate }) {
 
   return (
     <div>
-      <SectionTitle title="Medicamentos caducados" desc="Fuente de datos de la futura Declaración Semestral de Caducados." right={<button style={btnPrimary} onClick={() => setOpen(true)}><Plus size={16} /> Registrar caducado</button>} />
+      <SectionTitle title="Medicamentos caducados" desc="Fuente de datos de la futura Declaración Semestral de Caducados." right={<button style={btnPrimary} onClick={abrir}><Plus size={16} /> Registrar caducado</button>} />
       <Card style={{ marginBottom: 14, display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
         <div style={{ flex: 1, minWidth: 220 }}><label style={labelStyle}><Search size={13} style={{ verticalAlign: "middle" }} /> Buscar por nombre o CN</label><input style={inputStyle} value={q} onChange={(e) => setQ(e.target.value)} /></div>
         <Field label="Desde"><input type="date" style={{ ...inputStyle, width: 170 }} value={d1} onChange={(e) => setD1(e.target.value)} /></Field>
@@ -1077,13 +1115,14 @@ function Caducados({ caducados, onCreate }) {
           </tbody>
         </table>
       </Card>
-      <Drawer open={open} title="Registrar medicamento caducado" onClose={() => setOpen(false)}
-        footer={<><button style={btnGhost} onClick={() => setOpen(false)}>Cancelar</button><button style={btnPrimary} onClick={guardar}><Save size={15} /> Guardar</button></>}>
-        <Field label="CN (Código Nacional)"><input style={inputStyle} value={f.cn || ""} onChange={(e) => setF({ ...f, cn: e.target.value })} /></Field>
-        <Field label="Nombre del medicamento"><input style={inputStyle} value={f.nombre || ""} onChange={(e) => setF({ ...f, nombre: e.target.value })} /></Field>
+      <Drawer open={open} title="Registrar medicamento caducado" onClose={cerrar}
+        footer={<><button style={btnGhost} onClick={cerrar}>Cancelar</button><button style={{ ...btnPrimary, opacity: valid && !saving ? 1 : 0.5 }} disabled={!valid || saving} onClick={guardar}><Save size={15} /> {saving ? "Guardando…" : "Guardar"}</button></>}>
+        {err && <div style={errBox}>{err}</div>}
+        <Field label="CN (Código Nacional)"><input style={reqStyle(!(f.cn && f.cn.trim()))} value={f.cn || ""} onChange={(e) => setF({ ...f, cn: e.target.value })} /></Field>
+        <Field label="Nombre del medicamento"><input style={reqStyle(!(f.nombre && f.nombre.trim()))} value={f.nombre || ""} onChange={(e) => setF({ ...f, nombre: e.target.value })} /></Field>
         <Field label="Lote"><input style={inputStyle} value={f.lote || ""} onChange={(e) => setF({ ...f, lote: e.target.value })} /></Field>
-        <Field label="Fecha de caducidad"><input type="date" style={inputStyle} value={f.fechaCaducidad || ""} onChange={(e) => setF({ ...f, fechaCaducidad: e.target.value })} /></Field>
-        <Field label="Unidades caducadas"><input type="number" style={inputStyle} value={f.unidades || ""} onChange={(e) => setF({ ...f, unidades: e.target.value })} /></Field>
+        <Field label="Fecha de caducidad"><input type="date" style={reqStyle(!f.fechaCaducidad)} value={f.fechaCaducidad || ""} onChange={(e) => setF({ ...f, fechaCaducidad: e.target.value })} /></Field>
+        <Field label="Unidades caducadas"><input type="number" style={reqStyle(!(Number(f.unidades) > 0))} value={f.unidades || ""} onChange={(e) => setF({ ...f, unidades: e.target.value })} /></Field>
       </Drawer>
     </div>
   );
@@ -1095,14 +1134,23 @@ function Caducados({ caducados, onCreate }) {
 function Incidencias({ incidencias, onCreate, onUpdate, prefill, clearPrefill, meds }) {
   const [open, setOpen] = useState(false);
   const [f, setF] = useState({});
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
 
-  useEffect(() => { if (prefill) { setF({ estado: "Pendiente", ...prefill }); setOpen(true); } }, [prefill]);
+  useEffect(() => { if (prefill) { setF({ estado: "Pendiente", ...prefill }); setErr(""); setOpen(true); } }, [prefill]);
 
+  const cerrar = () => { setOpen(false); setF({}); setErr(""); if (clearPrefill) clearPrefill(); };
+  const valid = !!(f.tipo && f.medicamento && f.fechaHora && f.sistema && f.descripcion && f.descripcion.trim() && (f.tipo !== "Otro" || (f.tipoOtro && f.tipoOtro.trim())));
   const guardar = async () => {
-    if (f.id) await onUpdate(f); else await onCreate({ id: uid(), estado: "Pendiente", ...f });
-    setOpen(false); setF({}); if (clearPrefill) clearPrefill();
+    if (!valid || saving) return;
+    setSaving(true); setErr("");
+    try {
+      if (f.id) await onUpdate(f); else await onCreate({ id: uid(), estado: "Pendiente", ...f });
+      cerrar();
+    } catch (e) { setErr("No se pudo guardar la incidencia: " + (e && e.message ? e.message : e)); }
+    finally { setSaving(false); }
   };
-  const abrir = (inc) => { setF(inc || { estado: "Pendiente", fechaHora: new Date().toISOString().slice(0, 16) }); setOpen(true); };
+  const abrir = (inc) => { setErr(""); setF(inc || { estado: "Pendiente", fechaHora: new Date().toISOString().slice(0, 16) }); setOpen(true); };
 
   const stats = {
     activas: incidencias.filter((i) => i.estado !== "Resuelta").length,
@@ -1131,11 +1179,11 @@ function Incidencias({ incidencias, onCreate, onUpdate, prefill, clearPrefill, m
               {items.map((i) => (
                 <Card key={i.id} style={{ cursor: "pointer" }} >
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
-                    <div style={{ fontWeight: 700, color: C.text, fontSize: 14 }}>{i.tipo || "Incidencia"}</div>
+                    <div style={{ fontWeight: 700, color: C.text, fontSize: 14 }}>{i.tipo === "Otro" ? (i.tipoOtro || "Otro") : (i.tipo || "Incidencia")}</div>
                     <Badge level={i.estado === "Resuelta" ? "ok" : i.estado === "En revisión" ? "info" : "warn"}>{i.estado}</Badge>
                   </div>
                   <div style={{ fontSize: 13, color: C.sub, marginTop: 6 }}>{i.medicamento}</div>
-                  <div style={{ fontSize: 12, color: C.sub, marginTop: 4 }}>{i.fechaHora?.replace("T", " ")} · {i.sistema} · {i.cantidad} uds</div>
+                  <div style={{ fontSize: 12, color: C.sub, marginTop: 4 }}>{i.fechaHora ? fmtDateTime(new Date(i.fechaHora)) : "—"} · {i.sistema} · {i.cantidad} uds</div>
                   {i.descripcion && <div style={{ fontSize: 12, color: C.text, marginTop: 8 }}>{i.descripcion.slice(0, 110)}{i.descripcion.length > 110 ? "…" : ""}</div>}
                   <button style={{ ...microBtn, marginTop: 10 }} onClick={() => abrir(i)}>Abrir <ChevronRight size={13} /></button>
                 </Card>
@@ -1146,23 +1194,27 @@ function Incidencias({ incidencias, onCreate, onUpdate, prefill, clearPrefill, m
       })}
       {incidencias.length === 0 && <Card><Empty icon={<ShieldAlert size={26} />} text="Sin incidencias registradas." /></Card>}
 
-      <Drawer open={open} wide title={f.id ? "Editar incidencia" : "Nueva incidencia"} onClose={() => { setOpen(false); if (clearPrefill) clearPrefill(); }}
-        footer={<><button style={btnGhost} onClick={() => { setOpen(false); if (clearPrefill) clearPrefill(); }}>Cancelar</button><button style={btnPrimary} onClick={guardar}><Save size={15} /> Guardar</button></>}>
+      <Drawer open={open} wide title={f.id ? "Editar incidencia" : "Nueva incidencia"} onClose={cerrar}
+        footer={<><button style={btnGhost} onClick={cerrar}>Cancelar</button><button style={{ ...btnPrimary, opacity: valid && !saving ? 1 : 0.5 }} disabled={!valid || saving} onClick={guardar}><Save size={15} /> {saving ? "Guardando…" : "Guardar"}</button></>}>
+        {err && <div style={errBox}>{err}</div>}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
-          <Field label="Tipo de incidencia"><select style={inputStyle} value={f.tipo || ""} onChange={(e) => setF({ ...f, tipo: e.target.value })}><option value="">—</option>{TIPOS_INCIDENCIA.map((t) => <option key={t}>{t}</option>)}</select></Field>
-          <Field label="Sistema involucrado"><select style={inputStyle} value={f.sistema || ""} onChange={(e) => setF({ ...f, sistema: e.target.value })}><option value="">—</option>{SISTEMAS.map((s) => <option key={s}>{s}</option>)}</select></Field>
+          <Field label="Tipo de incidencia"><select style={reqStyle(!f.tipo)} value={f.tipo || ""} onChange={(e) => setF({ ...f, tipo: e.target.value, ...(e.target.value !== "Otro" ? { tipoOtro: "" } : {}) })}><option value="">—</option>{TIPOS_INCIDENCIA.map((t) => <option key={t}>{t}</option>)}</select></Field>
+          <Field label="Sistema involucrado"><select style={reqStyle(!f.sistema)} value={f.sistema || ""} onChange={(e) => setF({ ...f, sistema: e.target.value })}><option value="">—</option>{SISTEMAS.map((s) => <option key={s}>{s}</option>)}</select></Field>
         </div>
+        {f.tipo === "Otro" && (
+          <Field label="Especifica el tipo"><input style={reqStyle(!(f.tipoOtro && f.tipoOtro.trim()))} value={f.tipoOtro || ""} onChange={(e) => setF({ ...f, tipoOtro: e.target.value })} placeholder="Describe brevemente el tipo de incidencia" /></Field>
+        )}
         <Field label="Medicamento comprometido (Código V + nombre)">
-          <select style={inputStyle} value={f.medicamento || ""} onChange={(e) => setF({ ...f, medicamento: e.target.value })}>
+          <select style={reqStyle(!f.medicamento)} value={f.medicamento || ""} onChange={(e) => setF({ ...f, medicamento: e.target.value })}>
             <option value="">—</option>{meds.map((m) => <option key={m.codigoV} value={`${m.codigoV} · ${m.nombre}`}>{m.codigoV} · {m.nombre}</option>)}
           </select>
         </Field>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
-          <Field label="Fecha y hora"><input type="datetime-local" style={inputStyle} value={f.fechaHora || ""} onChange={(e) => setF({ ...f, fechaHora: e.target.value })} /></Field>
+          <Field label="Fecha y hora"><input type="datetime-local" style={reqStyle(!f.fechaHora)} value={f.fechaHora || ""} onChange={(e) => setF({ ...f, fechaHora: e.target.value })} /></Field>
           <Field label="Cantidad afectada"><input type="number" style={inputStyle} value={f.cantidad || ""} onChange={(e) => setF({ ...f, cantidad: e.target.value })} /></Field>
         </div>
         <Field label="Movimiento registrado (lo que apareció en el sistema)"><input style={inputStyle} value={f.movimiento || ""} onChange={(e) => setF({ ...f, movimiento: e.target.value })} /></Field>
-        <Field label="Descripción del problema"><textarea style={{ ...inputStyle, minHeight: 70 }} value={f.descripcion || ""} onChange={(e) => setF({ ...f, descripcion: e.target.value })} /></Field>
+        <Field label="Descripción del problema"><textarea style={{ ...reqStyle(!(f.descripcion && f.descripcion.trim())), minHeight: 70 }} value={f.descripcion || ""} onChange={(e) => setF({ ...f, descripcion: e.target.value })} /></Field>
         <Field label="Medida correctiva adoptada (puede rellenarse después)"><textarea style={{ ...inputStyle, minHeight: 70 }} value={f.medida || ""} onChange={(e) => setF({ ...f, medida: e.target.value })} /></Field>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
           <Field label="Estado"><select style={inputStyle} value={f.estado || "Pendiente"} onChange={(e) => setF({ ...f, estado: e.target.value })}>{["Pendiente", "En revisión", "Resuelta"].map((s) => <option key={s}>{s}</option>)}</select></Field>
