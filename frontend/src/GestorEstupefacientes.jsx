@@ -136,10 +136,31 @@ function fmtDateTime(d) {
   const p = (n) => String(n).padStart(2, "0");
   return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
-function fmtDate(iso) {
-  if (!iso) return "";
-  const [y, m, d] = iso.split("-");
-  return `${d}/${m}/${y}`;
+// Convierte cualquier valor de fecha (texto ISO completo, "YYYY-MM-DD",
+// serial de Excel o Date) a un objeto Date, o null si no se puede.
+function toDate(value) {
+  if (value == null || value === "") return null;
+  if (value instanceof Date) return isNaN(value.getTime()) ? null : value;
+  if (typeof value === "number") return excelSerialToDate(value);
+  const s = String(value).trim();
+  const soloFecha = s.match(/^(\d{4})-(\d{2})-(\d{2})$/); // sin hora → sin desfase de zona horaria
+  if (soloFecha) return new Date(+soloFecha[1], +soloFecha[2] - 1, +soloFecha[3]);
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? null : d;
+}
+// Fecha corta día/mes/año (dd/mm/aaaa). Robusta ante fechas con hora incrustada.
+function fmtDate(value) {
+  const d = toDate(value);
+  if (!d) return value ? String(value) : "";
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()}`;
+}
+// Fecha legible con hora, formato "05/08/26 - 14:30".
+function fmtStamp(value) {
+  const d = toDate(value);
+  if (!d) return value ? String(value) : "";
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${p(d.getFullYear() % 100)} - ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 function extraerCodigoV(txt) {
   if (!txt) return null;
@@ -520,7 +541,7 @@ function InventariosAnteriores({ inventarios }) {
                   border: `1px solid ${sel === f ? C.accent : C.border}`, background: sel === f ? "#EEF0FF" : "#fff",
                   display: "flex", justifyContent: "space-between", alignItems: "center",
                 }}>
-                  <span style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{fmtDate(f)}</span>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{fmtStamp(f)}</span>
                   {n > 0 ? <Badge level={n > 3 ? "crit" : "warn"}>{n} descuadres</Badge> : <Badge level="ok">OK</Badge>}
                 </button>
               );
