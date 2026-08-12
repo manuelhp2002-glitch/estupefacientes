@@ -189,9 +189,9 @@ function discColor(v) {
 --------------------------------------------------------------------------- */
 const DEFAULT_CONFIG = {
   descuadre: {
-    oral:  { orange: 6,  crit: 16 },
-    iv:    { orange: 16, crit: 31 },
-    fenta: { orange: 51, crit: 151 },
+    oral:  { warn: 1, orange: 6,  crit: 16 },
+    iv:    { warn: 1, orange: 16, crit: 31 },
+    fenta: { warn: 1, orange: 51, crit: 151 },
   },
   alertaDescuadre: { warn: false, orange: false, crit: true },
 };
@@ -201,8 +201,8 @@ function mergeConfig(stored) {
   const s = stored || {}, d = DEFAULT_CONFIG;
   const cat = (k) => {
     const sc = (s.descuadre && s.descuadre[k]) || {};
-    const orange = Number(sc.orange); const crit = Number(sc.crit);
-    return { orange: orange > 0 ? orange : d.descuadre[k].orange, crit: crit > 0 ? crit : d.descuadre[k].crit };
+    const num = (v, def) => { const n = Number(v); return n > 0 ? n : def; };
+    return { warn: num(sc.warn, d.descuadre[k].warn), orange: num(sc.orange, d.descuadre[k].orange), crit: num(sc.crit, d.descuadre[k].crit) };
   };
   const sa = s.alertaDescuadre || {};
   const flag = (k) => (k in sa ? !!sa[k] : d.alertaDescuadre[k]);
@@ -221,7 +221,8 @@ function nivelDescuadre(valor, cat, config) {
   const c = (config && config.descuadre && config.descuadre[cat]) || DEFAULT_CONFIG.descuadre[cat];
   if (a >= c.crit) return "crit";
   if (a >= c.orange) return "orange";
-  return "warn";
+  if (a >= c.warn) return "warn";
+  return "none"; // por debajo del amarillo configurado: sin relevancia
 }
 // Devuelve el peor (más grave) de dos niveles
 const ORDEN_NIVEL = { none: 0, warn: 1, orange: 2, crit: 3 };
@@ -1572,22 +1573,22 @@ function ConfiguracionView({ config, onSave }) {
 
       <Card style={{ marginBottom: 16 }}>
         <div style={{ fontWeight: 700, color: C.text, marginBottom: 4 }}>Umbrales de descuadre por tipo</div>
-        <div style={{ fontSize: 13, color: C.sub, marginBottom: 14 }}>Un descuadre de <b>0</b> = sin descuadre. Los números marcan a partir de cuántas unidades empieza cada color.</div>
+        <div style={{ fontSize: 13, color: C.sub, marginBottom: 14 }}>Un descuadre de <b>0</b> = sin descuadre. Cada número marca a partir de cuántas unidades empieza ese color. Un descuadre por debajo del amarillo se considera sin relevancia (sin color).</div>
         <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 640 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 680 }}>
             <thead><tr>
               <th style={th}>Tipo</th>
-              <th style={th}><Badge level="warn">Amarillo (leve)</Badge></th>
-              <th style={th}><Badge level="orange">Naranja (moderado) a partir de</Badge></th>
-              <th style={th}><Badge level="crit">Rojo (grave) a partir de</Badge></th>
+              <th style={th}><Badge level="warn">Amarillo (leve) desde</Badge></th>
+              <th style={th}><Badge level="orange">Naranja (moderado) desde</Badge></th>
+              <th style={th}><Badge level="crit">Rojo (grave) desde</Badge></th>
             </tr></thead>
             <tbody>
               {cats.map(([k, label, ic]) => {
-                const o = Number(c.descuadre[k].orange), cr = Number(c.descuadre[k].crit);
+                const w = Number(c.descuadre[k].warn), o = Number(c.descuadre[k].orange), cr = Number(c.descuadre[k].crit);
                 return (
                   <tr key={k}>
                     <td style={{ ...td, fontWeight: 600 }}><span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>{ic}{label}</span></td>
-                    <td style={{ ...td, color: C.sub }}>1 a {Math.max(1, o - 1)}</td>
+                    <td style={td}><input value={c.descuadre[k].warn} onChange={(e) => setUmbral(k, "warn", e.target.value)} style={miniInput} /> <span style={{ color: C.sub, fontSize: 12 }}>(hasta {Math.max(w, o - 1)})</span></td>
                     <td style={td}><input value={c.descuadre[k].orange} onChange={(e) => setUmbral(k, "orange", e.target.value)} style={miniInput} /> <span style={{ color: C.sub, fontSize: 12 }}>(hasta {Math.max(o, cr - 1)})</span></td>
                     <td style={td}><input value={c.descuadre[k].crit} onChange={(e) => setUmbral(k, "crit", e.target.value)} style={miniInput} /> <span style={{ color: C.sub, fontSize: 12 }}>o más</span></td>
                   </tr>
@@ -1680,20 +1681,22 @@ export default function App() {
       ]);
       setInventarios(inv.rows || []); setPedidos(ped.rows || []); setCaducados(cad.rows || []);
       setIncidencias(inc.rows || []);
-      // Catálogo y alertas se leen aparte: si el backend aún no tiene la hoja, no rompen el resto
+      // Catálogo y alertas se leen aparte: si el backend aún no tiene la hoja, no rompen el resto.
+      // La configuración vive en una fila especial de "Catalogo" (id "__config__") para que
+      // sea compartida sin necesidad de una hoja nueva ni de redesplegar el backend.
       try {
         const cat = await api.list("Catalogo");
-        if (cat && cat.rows && cat.rows.length) setMeds(cat.rows.map(normalizeMed)); // hoja vacía → se mantiene la semilla
+        if (cat && cat.rows) {
+          const cfgRow = cat.rows.find((r) => String(r.id) === "__config__");
+          if (cfgRow && cfgRow.json) { try { setConfig(mergeConfig(JSON.parse(cfgRow.json))); } catch (ej) { /* json corrupto: se mantiene la config local */ } }
+          const medRows = cat.rows.filter((r) => String(r.id) !== "__config__");
+          if (medRows.length) setMeds(medRows.map(normalizeMed)); // hoja vacía → se mantiene la semilla
+        }
       } catch (e2) { /* backend sin hoja Catalogo: se usa la semilla local */ }
       try {
         const ale = await api.list("Alertas");
         if (ale && ale.rows) setAlertas(ale.rows);
       } catch (e3) { /* backend sin hoja Alertas: se mantienen las locales */ }
-      try {
-        const cfg = await api.list("Config");
-        const row = cfg && cfg.rows && cfg.rows.find((r) => String(r.id) === "global");
-        if (row && row.json) setConfig(mergeConfig(JSON.parse(row.json)));
-      } catch (e4) { /* backend sin hoja Config: se mantiene la config local */ }
       notify("Datos cargados desde Google Sheets");
     } catch (e) { notify("Sin conexión a Sheets — trabajando en local", "warn"); }
     setSyncing(false);
@@ -1719,18 +1722,19 @@ export default function App() {
   };
   const pedirDesdeAlerta = (a) => { setPedidoPrefill({ estupefaciente: `${a.codigoV} · ${a.medicamento}`, _alertaId: a.id }); setView("pedidos"); };
 
-  // Guardar configuración (#6). Se guarda ya en este equipo; e intenta guardarla
-  // compartida en Google Sheets (best-effort, sin bloquear la cola: si el backend
-  // aún no tiene la hoja "Config", queda solo local hasta que se actualice el backend).
+  // Guardar configuración (#6). Se guarda ya en este equipo (localStorage) y, además,
+  // compartida en Google Sheets: en una fila especial de la hoja "Catalogo" (id
+  // "__config__"), que la app ya tiene permitida — así no hace falta hoja nueva ni
+  // redesplegar el backend. Best-effort: si no hay conexión, queda solo en local.
   const guardarConfig = async (nuevo) => {
     setConfig(nuevo);
     try {
       if (api.connected() && !isOffline()) {
-        const row = { id: "global", json: JSON.stringify(nuevo) };
-        await api.append("Config", row);          // crea la fila si no existe (idempotente)
-        await api.update("Config", "global", row); // asegura el valor actual
+        const row = { id: "__config__", codigoV: "(config)", nombre: "Ajustes de la app — no editar a mano", grupo: "", json: JSON.stringify(nuevo) };
+        await api.append("Catalogo", row);            // crea la fila si no existe (idempotente)
+        await api.update("Catalogo", "__config__", row); // asegura el valor actual
       }
-    } catch (e) { /* backend sin hoja Config aún: la config queda guardada en este equipo */ }
+    } catch (e) { /* sin conexión: la config queda guardada en este equipo */ }
     notify("Configuración guardada" + ((!api.connected() || isOffline()) ? " (en este equipo)" : ""));
   };
 
