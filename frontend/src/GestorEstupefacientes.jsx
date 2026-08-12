@@ -98,6 +98,57 @@ const medByV = Object.fromEntries(ALL_MEDS.map((m) => [m.codigoV, m]));
 
 const PROVEEDORES = ["COFARTE", "COFARES", "KERN PHARMA", "BRAUN", "FERRER FARMA", "LAPHYSAN", "MUNDIPHARMA", "REIG JOFRE", "Otro"];
 
+/* ---------------------------------------------------------------------------
+   CATÁLOGO CN → Código V (#8, #15) — semilla desde Catalogo_CN.xlsx.
+   Cada CN resuelve a UN medicamento (código V) y su proveedor habitual. Un mismo
+   medicamento puede tener varios CN (marcas/proveedores distintos). El nombre del
+   medicamento se toma del catálogo oficial (medByV) por su código V.
+--------------------------------------------------------------------------- */
+const CN_CATALOGO_SEED = [
+  { cn: "227603", codigoV: "T93631", proveedor: "COFARTE" },
+  { cn: "650687", codigoV: "V29931", proveedor: "MUNDIPHARMA" },
+  { cn: "650823", codigoV: "V18636", proveedor: "COFARTE", marca: "Oxynorm" },
+  { cn: "651505", codigoV: "V02175", proveedor: "COFARTE" },
+  { cn: "651679", codigoV: "V02208", proveedor: "MUNDIPHARMA" },
+  { cn: "656757", codigoV: "V19176", proveedor: "COFARTE" },
+  { cn: "658523", codigoV: "V02715", proveedor: "COFARES" },
+  { cn: "658583", codigoV: "V02227", proveedor: "FERRER FARMA" },
+  { cn: "662577", codigoV: "V02257", proveedor: "COFARTE" },
+  { cn: "664540", codigoV: "V00639", proveedor: "COFARTE" },
+  { cn: "672785", codigoV: "V19630", proveedor: "KERN PHARMA" },
+  { cn: "677269", codigoV: "V19632", proveedor: "REIG JOFRE" },
+  { cn: "679555", codigoV: "V03592", proveedor: "COFARTE" },
+  { cn: "700636", codigoV: "V00639", proveedor: "COFARTE" },
+  { cn: "700638", codigoV: "V03200", proveedor: "COFARTE" },
+  { cn: "711374", codigoV: "V04718", proveedor: "COFARTE", marca: "Actiq" },
+  { cn: "712742", codigoV: "V04751", proveedor: "FERRER FARMA", marca: "Actiq" },
+  { cn: "712748", codigoV: "V04718", proveedor: "FERRER FARMA", marca: "Abfentiq" },
+  { cn: "712751", codigoV: "V04731", proveedor: "FERRER FARMA", marca: "Actiq" },
+  { cn: "720313", codigoV: "V02015", proveedor: "BRAUN" },
+  { cn: "720314", codigoV: "Y81210", proveedor: "BRAUN" },
+  { cn: "721741", codigoV: "V04751", proveedor: "FERRER FARMA", marca: "Abfentiq" },
+  { cn: "724841", codigoV: "V02257", proveedor: "FERRER FARMA" },
+  { cn: "724842", codigoV: "V02227", proveedor: "FERRER FARMA" },
+  { cn: "724843", codigoV: "V02258", proveedor: "FERRER FARMA" },
+  { cn: "724844", codigoV: "V02256", proveedor: "FERRER FARMA" },
+  { cn: "724845", codigoV: "V02715", proveedor: "FERRER FARMA" },
+  { cn: "756650", codigoV: "V07610", proveedor: "KERN PHARMA" },
+  { cn: "764909", codigoV: "V07610", proveedor: "LAPHYSAN" },
+  { cn: "787945", codigoV: "V09424", proveedor: "COFARTE", marca: "Sevredol" },
+  { cn: "795062", codigoV: "V02304", proveedor: "KERN PHARMA" },
+  { cn: "821934", codigoV: "V18636", proveedor: "COFARTE", marca: "Oxynorm" },
+  { cn: "914432", codigoV: "V04718", proveedor: "COFARTE", marca: "Actiq" },
+  { cn: "945444", codigoV: "V04751", proveedor: "COFARTE", marca: "Actiq" },
+  { cn: "981365", codigoV: "V00656", proveedor: "COFARTE" },
+  { cn: "981373", codigoV: "V00655", proveedor: "COFARTE" },
+];
+// Fusiona la semilla con la capa guardada (por CN gana la guardada y añade CN nuevos)
+function mergeCn(saved) {
+  const map = new Map(CN_CATALOGO_SEED.map((e) => [String(e.cn), { ...e, cn: String(e.cn) }]));
+  (Array.isArray(saved) ? saved : []).forEach((e) => { if (e && e.cn) map.set(String(e.cn), { ...map.get(String(e.cn)), ...e, cn: String(e.cn) }); });
+  return Array.from(map.values());
+}
+
 const TIPOS_INCIDENCIA = [
   "Carga manual SADE", "Descarga manual SADE", "Entrada mal registrada",
   "Movimiento por rotura incorrecto", "Movimiento por caducidad incorrecto",
@@ -1053,7 +1104,7 @@ function nextVale(pedidos) {
   return `${best.prefix}${String(best.num + 1).padStart(best.width, "0")}`;
 }
 
-function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, prefill, clearPrefill }) {
+function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, cnMap, prefill, clearPrefill }) {
   const [openNew, setOpenNew] = useState(false);
   const [openRecep, setOpenRecep] = useState(null);
   const [f, setF] = useState({});
@@ -1066,6 +1117,14 @@ function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, prefill, clearPref
   const abrirNuevo = (base) => { setErr(""); setF({ fechaPedido: todayISO(), vale: nextVale(pedidos), ...(base || {}) }); setOpenNew(true); };
   // Abre el mismo formulario para EDITAR un pedido existente: todos los campos, en cualquier momento (#1)
   const abrirEditar = (p) => { setErr(""); setF({ ...p }); setOpenNew(true); };
+  // Al escribir el CN, autocompleta medicamento y proveedor si el CN está en la base de datos (#8). Editable.
+  const setCn = (val) => {
+    const hit = cnMap && cnMap[String(val).trim()];
+    if (hit) {
+      const m = meds.find((x) => x.codigoV === hit.codigoV);
+      setF((prev) => ({ ...prev, cn: val, estupefaciente: m ? `${m.codigoV} · ${m.nombre}` : prev.estupefaciente, ...(hit.proveedor ? { proveedor: hit.proveedor } : {}) }));
+    } else { setF((prev) => ({ ...prev, cn: val })); }
+  };
   // Prefill desde una alerta de reposición: abre el drawer con el medicamento cargado
   useEffect(() => { if (prefill) abrirNuevo(prefill); /* eslint-disable-next-line */ }, [prefill]);
 
@@ -1188,7 +1247,10 @@ function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, prefill, clearPref
             ? <div style={{ color: C.red, fontSize: 12, marginTop: 5 }}>Ya existe un pedido con este nº de vale.</div>
             : (!editando && <div style={{ color: C.sub, fontSize: 12, marginTop: 5 }}>Se ha puesto el siguiente número automáticamente. Puedes cambiarlo si necesitas otro.</div>)}
         </Field>
-        <Field label="CN (Código Nacional)"><input style={inputStyle} value={f.cn || ""} onChange={(e) => setF({ ...f, cn: e.target.value })} /></Field>
+        <Field label="CN (Código Nacional)">
+          <input style={inputStyle} value={f.cn || ""} onChange={(e) => setCn(e.target.value)} placeholder="Al escribirlo se rellena el medicamento y el proveedor" />
+          {f.cn && cnMap[String(f.cn).trim()] && <div style={{ color: C.green, fontSize: 12, marginTop: 5 }}>✓ Medicamento y proveedor rellenados automáticamente</div>}
+        </Field>
         <Field label="Estupefaciente (Código V + nombre)">
           <select style={reqStyle(!f.estupefaciente)} value={f.estupefaciente || ""} onChange={(e) => setF({ ...f, estupefaciente: e.target.value })}>
             <option value="">— Seleccionar —</option>
@@ -1234,7 +1296,7 @@ const microBtn = { fontSize: 12, padding: "6px 10px", borderRadius: 8, border: `
 /* ===========================================================================
    5) REGISTRO DE MEDICAMENTOS CADUCADOS
 =========================================================================== */
-function Caducados({ caducados, onCreate }) {
+function Caducados({ caducados, onCreate, meds, cnMap }) {
   const [open, setOpen] = useState(false);
   const [f, setF] = useState({});
   const [q, setQ] = useState("");
@@ -1242,6 +1304,14 @@ function Caducados({ caducados, onCreate }) {
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
 
+  // Al escribir el CN, autocompleta el nombre del medicamento si está en la base de datos (#15). Editable.
+  const setCn = (val) => {
+    const hit = cnMap && cnMap[String(val).trim()];
+    if (hit) {
+      const m = (meds || []).find((x) => x.codigoV === hit.codigoV);
+      setF((prev) => ({ ...prev, cn: val, nombre: m ? m.nombre : (hit.marca || prev.nombre) }));
+    } else { setF((prev) => ({ ...prev, cn: val })); }
+  };
   const abrir = () => { setErr(""); setF({}); setOpen(true); };
   const cerrar = () => { setOpen(false); setF({}); setErr(""); };
   const valid = !!(f.cn && f.cn.trim() && f.nombre && f.nombre.trim() && f.fechaCaducidad && Number(f.unidades) > 0);
@@ -1279,7 +1349,10 @@ function Caducados({ caducados, onCreate }) {
       <Drawer open={open} title="Registrar medicamento caducado" onClose={cerrar}
         footer={<><button style={btnGhost} onClick={cerrar}>Cancelar</button><button style={{ ...btnPrimary, opacity: valid && !saving ? 1 : 0.5 }} disabled={!valid || saving} onClick={guardar}><Save size={15} /> {saving ? "Guardando…" : "Guardar"}</button></>}>
         {err && <div style={errBox}>{err}</div>}
-        <Field label="CN (Código Nacional)"><input style={reqStyle(!(f.cn && f.cn.trim()))} value={f.cn || ""} onChange={(e) => setF({ ...f, cn: e.target.value })} /></Field>
+        <Field label="CN (Código Nacional)">
+          <input style={reqStyle(!(f.cn && f.cn.trim()))} value={f.cn || ""} onChange={(e) => setCn(e.target.value)} placeholder="Al escribirlo se rellena el nombre del medicamento" />
+          {f.cn && cnMap[String(f.cn).trim()] && <div style={{ color: C.green, fontSize: 12, marginTop: 5 }}>✓ Nombre rellenado automáticamente</div>}
+        </Field>
         <Field label="Nombre del medicamento"><input style={reqStyle(!(f.nombre && f.nombre.trim()))} value={f.nombre || ""} onChange={(e) => setF({ ...f, nombre: e.target.value })} /></Field>
         <Field label="Lote"><input style={inputStyle} value={f.lote || ""} onChange={(e) => setF({ ...f, lote: e.target.value })} /></Field>
         <Field label="Fecha de caducidad"><input type="date" style={reqStyle(!f.fechaCaducidad)} value={f.fechaCaducidad || ""} onChange={(e) => setF({ ...f, fechaCaducidad: e.target.value })} /></Field>
@@ -1554,7 +1627,8 @@ function AlertasView({ alertas, onEstado, onPedir }) {
 /* ===========================================================================
    CONFIGURACIÓN (#6) — umbrales de color de descuadre y cuándo generan alerta
 =========================================================================== */
-function ConfiguracionView({ config, onSave }) {
+function ConfiguracionView({ config, onSave, cnCatalogo, meds }) {
+  const medByV = useMemo(() => Object.fromEntries((meds || []).map((m) => [m.codigoV, m])), [meds]);
   const [c, setC] = useState(() => mergeConfig(config));
   const [saving, setSaving] = useState(false);
   const [ok, setOk] = useState(false);
@@ -1607,6 +1681,28 @@ function ConfiguracionView({ config, onSave }) {
           ))}
         </div>
       </Card>
+
+      <Card style={{ marginTop: 16 }}>
+        <div style={{ fontWeight: 700, color: C.text, marginBottom: 4 }}>Base de datos de Código Nacional (CN)</div>
+        <div style={{ fontSize: 13, color: C.sub, marginBottom: 14 }}>Al escribir un CN en Pedidos o en Caducados, la app rellena sola el medicamento (y el proveedor en pedidos). Hay <b>{(cnCatalogo || []).length}</b> CN cargados. Se guardan compartidos en Google Sheets. <i>(La edición de esta lista desde la app llegará en el siguiente paso.)</i></div>
+        <div style={{ overflowX: "auto", maxHeight: 340, overflowY: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 560 }}>
+            <thead><tr>
+              <th style={th}>CN</th><th style={th}>Medicamento</th><th style={th}>Código V</th><th style={th}>Proveedor habitual</th>
+            </tr></thead>
+            <tbody>
+              {[...(cnCatalogo || [])].sort((a, b) => String(a.cn).localeCompare(String(b.cn))).map((e) => (
+                <tr key={e.cn}>
+                  <td style={{ ...td, fontFamily: "monospace", fontSize: 12 }}>{e.cn}</td>
+                  <td style={td}>{(medByV[e.codigoV] && medByV[e.codigoV].nombre) || e.marca || "—"}</td>
+                  <td style={{ ...td, fontFamily: "monospace", fontSize: 12 }}>{e.codigoV}</td>
+                  <td style={td}>{e.proveedor || "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
     </div>
   );
 }
@@ -1646,12 +1742,14 @@ export default function App() {
   const [meds, setMeds] = useState(() => lsGet(LS.data("Catalogo"), ALL_MEDS));
   const [alertas, setAlertas] = useState(() => lsGet(LS.data("Alertas"), []));
   const [config, setConfig] = useState(() => mergeConfig(lsGet(LS.data("Config"), null))); // niveles de descuadre/alerta (#5/#6/#22)
+  const [cnCatalogo, setCnCatalogo] = useState(() => mergeCn(lsGet(LS.data("CnCatalogo"), null))); // CN → medicamento (#8/#15)
   const [resumenAlertas, setResumenAlertas] = useState(null);
   const [avisosRepo, setAvisosRepo] = useState([]);
   const [incPrefill, setIncPrefill] = useState(null);
   const [pedidoPrefill, setPedidoPrefill] = useState(null);
 
   const medByV = useMemo(() => Object.fromEntries(meds.map((m) => [m.codigoV, m])), [meds]);
+  const cnMap = useMemo(() => Object.fromEntries(cnCatalogo.map((e) => [String(e.cn), e])), [cnCatalogo]);
 
   const notify = (msg, tone = "ok") => { setToast({ msg, tone }); setTimeout(() => setToast(null), 3200); };
 
@@ -1663,6 +1761,7 @@ export default function App() {
   useEffect(() => { lsSet(LS.data("Catalogo"), meds); }, [meds]);
   useEffect(() => { lsSet(LS.data("Alertas"), alertas); }, [alertas]);
   useEffect(() => { lsSet(LS.data("Config"), config); }, [config]);
+  useEffect(() => { lsSet(LS.data("CnCatalogo"), cnCatalogo); }, [cnCatalogo]);
 
   // Vuelca la cola de escrituras pendientes al backend (idempotente por id)
   const flush = async () => { const restantes = await outboxFlush(api); setPendientes(restantes); return restantes; };
@@ -1686,7 +1785,13 @@ export default function App() {
         if (cat && cat.rows) {
           const cfgRow = cat.rows.find((r) => String(r.id) === "__config__");
           if (cfgRow && cfgRow.json) { try { setConfig(mergeConfig(JSON.parse(cfgRow.json))); } catch (ej) { /* json corrupto: se mantiene la config local */ } }
-          const medRows = cat.rows.filter((r) => String(r.id) !== "__config__");
+          // Catálogo CN (#8/#15): vive en la fila especial "__cncatalog__". Si aún no
+          // existe, se siembra en el Sheet (una vez) para que la lista viva ahí.
+          const cnRow = cat.rows.find((r) => String(r.id) === "__cncatalog__");
+          if (cnRow && cnRow.json) { try { setCnCatalogo(mergeCn(JSON.parse(cnRow.json))); } catch (ek) { /* json corrupto: se mantiene el local */ } }
+          else { try { await api.append("Catalogo", { id: "__cncatalog__", codigoV: "(cn)", nombre: "Base de datos CN — no editar a mano", grupo: "", json: JSON.stringify(CN_CATALOGO_SEED) }); } catch (es) { /* se reintenta en otra carga */ } }
+          const especiales = new Set(["__config__", "__cncatalog__"]);
+          const medRows = cat.rows.filter((r) => !especiales.has(String(r.id)));
           if (medRows.length) setMeds(medRows.map(normalizeMed)); // hoja vacía → se mantiene la semilla
         }
       } catch (e2) { /* backend sin hoja Catalogo: se usa la semilla local */ }
@@ -1865,10 +1970,10 @@ export default function App() {
         {view === "anteriores" && <InventariosAnteriores inventarios={inventarios} config={config} />}
         {view === "detector" && <DetectorAlertas onResumen={registrarResumenAlertas} onGuardarCruce={guardarCruce} sheetsConnected={connected} onNombrePaciente={() => notify("⚠️ Posible nombre de paciente detectado y excluido del procesamiento", "crit")} />}
         {view === "alertas" && <AlertasView alertas={alertas} onEstado={marcarAlerta} onPedir={pedirDesdeAlerta} />}
-        {view === "pedidos" && <RegistroPedidos pedidos={pedidos} onCreate={crearPedido} onUpdate={actualizarPedido} meds={meds} prefill={pedidoPrefill} clearPrefill={() => setPedidoPrefill(null)} />}
-        {view === "caducados" && <Caducados caducados={caducados} onCreate={crearCaducado} />}
+        {view === "pedidos" && <RegistroPedidos pedidos={pedidos} onCreate={crearPedido} onUpdate={actualizarPedido} meds={meds} cnMap={cnMap} prefill={pedidoPrefill} clearPrefill={() => setPedidoPrefill(null)} />}
+        {view === "caducados" && <Caducados caducados={caducados} onCreate={crearCaducado} meds={meds} cnMap={cnMap} />}
         {view === "incidencias" && <Incidencias incidencias={incidencias} onCreate={crearIncidencia} onUpdate={actualizarIncidencia} prefill={incPrefill} clearPrefill={() => setIncPrefill(null)} meds={meds} />}
-        {view === "configuracion" && <ConfiguracionView config={config} onSave={guardarConfig} />}
+        {view === "configuracion" && <ConfiguracionView config={config} onSave={guardarConfig} cnCatalogo={cnCatalogo} meds={meds} />}
       </main>
 
       {/* AJUSTES */}
