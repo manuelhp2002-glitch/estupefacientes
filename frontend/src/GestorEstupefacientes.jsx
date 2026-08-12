@@ -1104,7 +1104,7 @@ function nextVale(pedidos) {
   return `${best.prefix}${String(best.num + 1).padStart(best.width, "0")}`;
 }
 
-function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, cnMap, prefill, clearPrefill }) {
+function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, cnMap, cnCatalogo, prefill, clearPrefill }) {
   const [openNew, setOpenNew] = useState(false);
   const [openRecep, setOpenRecep] = useState(null);
   const [f, setF] = useState({});
@@ -1117,7 +1117,7 @@ function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, cnMap, prefill, cl
   const abrirNuevo = (base) => { setErr(""); setF({ fechaPedido: todayISO(), vale: nextVale(pedidos), ...(base || {}) }); setOpenNew(true); };
   // Abre el mismo formulario para EDITAR un pedido existente: todos los campos, en cualquier momento (#1)
   const abrirEditar = (p) => { setErr(""); setF({ ...p }); setOpenNew(true); };
-  // Al escribir el CN, autocompleta medicamento y proveedor si el CN está en la base de datos (#8). Editable.
+  // Al escribir el CN a mano, autocompleta medicamento y proveedor si existe (#8). Editable.
   const setCn = (val) => {
     const hit = cnMap && cnMap[String(val).trim()];
     if (hit) {
@@ -1125,6 +1125,19 @@ function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, cnMap, prefill, cl
       setF((prev) => ({ ...prev, cn: val, estupefaciente: m ? `${m.codigoV} · ${m.nombre}` : prev.estupefaciente, ...(hit.proveedor ? { proveedor: hit.proveedor } : {}) }));
     } else { setF((prev) => ({ ...prev, cn: val })); }
   };
+  // Al ELEGIR el estupefaciente, pone su CN (el último si hay varios) y el proveedor (#8). Editable.
+  const setEstupefaciente = (val) => {
+    const cv = (String(val).match(/([VYT]\d{5})/) || [])[1] || "";
+    const cns = cv ? (cnCatalogo || []).filter((x) => String(x.codigoV) === cv) : [];
+    if (cns.length) {
+      const ult = cns[cns.length - 1];
+      setF((prev) => ({ ...prev, estupefaciente: val, cn: ult.cn, proveedor: ult.proveedor || prev.proveedor }));
+    } else { setF((prev) => ({ ...prev, estupefaciente: val, cn: "" })); }
+  };
+  const elegirCn = (e) => setF((prev) => ({ ...prev, cn: e.cn, proveedor: e.proveedor || prev.proveedor }));
+  // CN disponibles para el estupefaciente elegido (para el aviso/selector si hay varios)
+  const codigoVSel = (String(f.estupefaciente || "").match(/([VYT]\d{5})/) || [])[1] || "";
+  const cnsForV = codigoVSel ? (cnCatalogo || []).filter((x) => String(x.codigoV) === codigoVSel) : [];
   // Prefill desde una alerta de reposición: abre el drawer con el medicamento cargado
   useEffect(() => { if (prefill) abrirNuevo(prefill); /* eslint-disable-next-line */ }, [prefill]);
 
@@ -1247,15 +1260,24 @@ function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, cnMap, prefill, cl
             ? <div style={{ color: C.red, fontSize: 12, marginTop: 5 }}>Ya existe un pedido con este nº de vale.</div>
             : (!editando && <div style={{ color: C.sub, fontSize: 12, marginTop: 5 }}>Se ha puesto el siguiente número automáticamente. Puedes cambiarlo si necesitas otro.</div>)}
         </Field>
-        <Field label="CN (Código Nacional)">
-          <input style={inputStyle} value={f.cn || ""} onChange={(e) => setCn(e.target.value)} placeholder="Al escribirlo se rellena el medicamento y el proveedor" />
-          {f.cn && cnMap[String(f.cn).trim()] && <div style={{ color: C.green, fontSize: 12, marginTop: 5 }}>✓ Medicamento y proveedor rellenados automáticamente</div>}
-        </Field>
         <Field label="Estupefaciente (Código V + nombre)">
-          <select style={reqStyle(!f.estupefaciente)} value={f.estupefaciente || ""} onChange={(e) => setF({ ...f, estupefaciente: e.target.value })}>
+          <select style={reqStyle(!f.estupefaciente)} value={f.estupefaciente || ""} onChange={(e) => setEstupefaciente(e.target.value)}>
             <option value="">— Seleccionar —</option>
             {meds.map((m) => <option key={m.codigoV} value={`${m.codigoV} · ${m.nombre}`}>{m.codigoV} · {m.nombre}</option>)}
           </select>
+        </Field>
+        <Field label="CN (Código Nacional)">
+          <input style={inputStyle} value={f.cn || ""} onChange={(e) => setCn(e.target.value)} placeholder="Se rellena al elegir el estupefaciente" />
+          {cnsForV.length > 1 ? (
+            <div style={{ marginTop: 6, background: C.yellowBg, border: `1px solid ${C.yellow}`, borderRadius: 8, padding: "8px 10px" }}>
+              <div style={{ fontSize: 12, color: "#854d0e", marginBottom: 6 }}>⚠ Este medicamento tiene varios CN (según proveedor). Revisa que sea el correcto o elige uno:</div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {cnsForV.map((e) => (
+                  <button key={e.cn} type="button" onClick={() => elegirCn(e)} style={{ ...microBtn, ...(String(f.cn) === String(e.cn) ? { borderColor: C.accent, background: "#EEF0FF" } : {}) }}>{e.cn} · {e.proveedor || "—"}</button>
+                ))}
+              </div>
+            </div>
+          ) : (cnsForV.length === 1 && f.cn && <div style={{ color: C.green, fontSize: 12, marginTop: 5 }}>✓ CN y proveedor puestos automáticamente</div>)}
         </Field>
         <Field label="Fecha de pedido"><input type="date" style={reqStyle(!f.fechaPedido)} value={f.fechaPedido || todayISO()} onChange={(e) => setF({ ...f, fechaPedido: e.target.value })} /></Field>
         <Field label="Unidades pedidas"><input type="number" style={reqStyle(!(Number(f.udsPedidas) > 0))} value={f.udsPedidas || ""} onChange={(e) => setF({ ...f, udsPedidas: e.target.value })} /></Field>
@@ -1970,7 +1992,7 @@ export default function App() {
         {view === "anteriores" && <InventariosAnteriores inventarios={inventarios} config={config} />}
         {view === "detector" && <DetectorAlertas onResumen={registrarResumenAlertas} onGuardarCruce={guardarCruce} sheetsConnected={connected} onNombrePaciente={() => notify("⚠️ Posible nombre de paciente detectado y excluido del procesamiento", "crit")} />}
         {view === "alertas" && <AlertasView alertas={alertas} onEstado={marcarAlerta} onPedir={pedirDesdeAlerta} />}
-        {view === "pedidos" && <RegistroPedidos pedidos={pedidos} onCreate={crearPedido} onUpdate={actualizarPedido} meds={meds} cnMap={cnMap} prefill={pedidoPrefill} clearPrefill={() => setPedidoPrefill(null)} />}
+        {view === "pedidos" && <RegistroPedidos pedidos={pedidos} onCreate={crearPedido} onUpdate={actualizarPedido} meds={meds} cnMap={cnMap} cnCatalogo={cnCatalogo} prefill={pedidoPrefill} clearPrefill={() => setPedidoPrefill(null)} />}
         {view === "caducados" && <Caducados caducados={caducados} onCreate={crearCaducado} meds={meds} cnMap={cnMap} />}
         {view === "incidencias" && <Incidencias incidencias={incidencias} onCreate={crearIncidencia} onUpdate={actualizarIncidencia} prefill={incPrefill} clearPrefill={() => setIncPrefill(null)} meds={meds} />}
         {view === "configuracion" && <ConfiguracionView config={config} onSave={guardarConfig} cnCatalogo={cnCatalogo} meds={meds} />}
