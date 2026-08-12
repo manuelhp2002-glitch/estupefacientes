@@ -37,6 +37,8 @@ const C = {
   greenBg: "#DCFCE7",
   yellow: "#CA8A04",
   yellowBg: "#FEF9C3",
+  orange: "#EA580C",
+  orangeBg: "#FFEDD5",
   red: "#DC2626",
   redBg: "#FEE2E2",
 };
@@ -167,13 +169,66 @@ function extraerCodigoV(txt) {
   const m = String(txt).match(/([VYT]\d{5})/i);
   return m ? m[1].toUpperCase() : null;
 }
-// nivel de descuadre -> color
+// nivel de descuadre -> color (versión antigua uniforme; se conserva por compatibilidad)
 function discColor(v) {
   const a = Math.abs(Number(v) || 0);
   if (a === 0) return "none";
   if (a <= 10) return "warn";
   return "crit";
 }
+
+/* ---------------------------------------------------------------------------
+   CONFIGURACIÓN DE NIVELES (#5, #6, #22)
+   descuadre[cat] = { orange, crit }: un descuadre (en valor absoluto)
+     0             -> "none"  (sin descuadre)
+     1 .. orange-1 -> "warn"  (amarillo)
+     orange .. crit-1 -> "orange" (naranja)
+     >= crit       -> "crit"  (rojo)
+   alertaDescuadre: qué niveles generan alerta al guardar un inventario (#22).
+   Categorías: "oral", "iv" y "fenta" (solo V07610, el fentanilo 150 mcg/3mL amp).
+--------------------------------------------------------------------------- */
+const DEFAULT_CONFIG = {
+  descuadre: {
+    oral:  { orange: 6,  crit: 16 },
+    iv:    { orange: 16, crit: 31 },
+    fenta: { orange: 51, crit: 151 },
+  },
+  alertaDescuadre: { warn: false, orange: false, crit: true },
+};
+
+// Rellena/normaliza un config almacenado con los valores por defecto (evita huecos)
+function mergeConfig(stored) {
+  const s = stored || {}, d = DEFAULT_CONFIG;
+  const cat = (k) => {
+    const sc = (s.descuadre && s.descuadre[k]) || {};
+    const orange = Number(sc.orange); const crit = Number(sc.crit);
+    return { orange: orange > 0 ? orange : d.descuadre[k].orange, crit: crit > 0 ? crit : d.descuadre[k].crit };
+  };
+  const sa = s.alertaDescuadre || {};
+  const flag = (k) => (k in sa ? !!sa[k] : d.alertaDescuadre[k]);
+  return { descuadre: { oral: cat("oral"), iv: cat("iv"), fenta: cat("fenta") }, alertaDescuadre: { warn: flag("warn"), orange: flag("orange"), crit: flag("crit") } };
+}
+
+// Categoría de umbrales de un medicamento: el fentanilo 150 mcg/3mL amp (V07610) es aparte
+function medCat(codigoV, grupo) {
+  if (String(codigoV) === "V07610") return "fenta";
+  return String(grupo) === "IV" ? "iv" : "oral";
+}
+// Nivel de un descuadre según la categoría y los umbrales configurados
+function nivelDescuadre(valor, cat, config) {
+  const a = Math.abs(Number(valor) || 0);
+  if (a === 0) return "none";
+  const c = (config && config.descuadre && config.descuadre[cat]) || DEFAULT_CONFIG.descuadre[cat];
+  if (a >= c.crit) return "crit";
+  if (a >= c.orange) return "orange";
+  return "warn";
+}
+// Devuelve el peor (más grave) de dos niveles
+const ORDEN_NIVEL = { none: 0, warn: 1, orange: 2, crit: 3 };
+const nivelPeor = (a, b) => (ORDEN_NIVEL[a] >= ORDEN_NIVEL[b] ? a : b);
+// ¿Hay descuadre (distinto de cero) en alguna de las dos columnas?
+const hayDescuadre = (r) => (Number(r.descRealD07) || 0) !== 0 || (Number(r.descD07Maestro) || 0) !== 0;
+
 // nivel de stock frente a min/max
 function stockLevel(real, med) {
   if (!med || med.max == null || med.min == null || (med.max === 0 && med.min === 0)) return null;
@@ -312,6 +367,15 @@ function alertaDetector(r) {
     fecha: r.fecha, detalle: `${r.tipo || "movimiento"} · ${r.cantidad} uds`, estado: "pendiente",
   };
 }
+// Alerta de descuadre de inventario (#22): una por columna de descuadre que alcance un nivel con alerta activada
+function alertaDescuadre(fila, fecha, etiqueta, valor, nivel) {
+  return {
+    id: `desc-${sanitizeId(fila.codigoV)}-${sanitizeId(fecha)}-${sanitizeId(etiqueta)}`,
+    origen: "inventario", tipo: "descuadre", codigos: "",
+    codigoV: fila.codigoV, medicamento: fila.nombre, nivel,
+    fecha, detalle: `Descuadre ${etiqueta}: ${Number(valor) > 0 ? "+" : ""}${valor}`, estado: "pendiente",
+  };
+}
 
 /* ---------------------------------------------------------------------------
    PRIMITIVAS UI
@@ -321,6 +385,7 @@ function Badge({ level, children }) {
     none: { bg: "#F3F4F6", fg: C.sub },
     ok: { bg: C.greenBg, fg: C.green },
     warn: { bg: C.yellowBg, fg: C.yellow },
+    orange: { bg: C.orangeBg, fg: C.orange },
     crit: { bg: C.redBg, fg: C.red },
     info: { bg: "#E0E7FF", fg: C.accent },
   };
@@ -407,7 +472,7 @@ function GroupToggle({ value, onChange }) {
 }
 const th = { textAlign: "left", padding: "10px 12px", fontSize: 12, fontWeight: 700, color: C.sub, borderBottom: `1px solid ${C.border}`, whiteSpace: "nowrap" };
 const td = { padding: "10px 12px", fontSize: 13, color: C.text, borderBottom: `1px solid ${C.border}` };
-const rowBg = { none: "#fff", warn: C.yellowBg, crit: C.redBg };
+const rowBg = { none: "#fff", warn: C.yellowBg, orange: C.orangeBg, crit: C.redBg };
 
 /* ===========================================================================
    1) INVENTARIO SEMANAL
@@ -415,7 +480,7 @@ const rowBg = { none: "#fff", warn: C.yellowBg, crit: C.redBg };
 function buildInventarioRows(meds, grupo) {
   return meds.filter((m) => m.grupo === grupo).map((m) => ({ codigoV: m.codigoV, nombre: m.nombre, real: "", d07: "", maestro: "" }));
 }
-function InventarioSemanal({ onSaved, avisos, meds, medByV }) {
+function InventarioSemanal({ onSaved, avisos, meds, medByV, config }) {
   const [grupo, setGrupo] = useState("ORAL");
   const [fecha, setFecha] = useState(todayISO());
   const [rows, setRows] = useState(() => ({ ORAL: buildInventarioRows(meds, "ORAL"), IV: buildInventarioRows(meds, "IV") }));
@@ -459,9 +524,11 @@ function InventarioSemanal({ onSaved, avisos, meds, medByV }) {
 
       <Card style={{ marginBottom: 16, display: "flex", gap: 18, alignItems: "center", flexWrap: "wrap" }}>
         <Field label="Fecha del inventario"><input type="date" value={fecha} onChange={(e) => setFecha(e.target.value)} style={{ ...inputStyle, width: 200 }} /></Field>
-        <div style={{ display: "flex", gap: 14, fontSize: 12, color: C.sub, marginTop: 20 }}>
-          <span><span style={{ ...legendDot, background: C.yellowBg, border: `1px solid ${C.yellow}` }} /> descuadre 1–10</span>
-          <span><span style={{ ...legendDot, background: C.redBg, border: `1px solid ${C.red}` }} /> descuadre &gt;10</span>
+        <div style={{ display: "flex", gap: 14, fontSize: 12, color: C.sub, marginTop: 20, flexWrap: "wrap" }}>
+          <span><span style={{ ...legendDot, background: C.yellowBg, border: `1px solid ${C.yellow}` }} /> leve</span>
+          <span><span style={{ ...legendDot, background: C.orangeBg, border: `1px solid ${C.orange}` }} /> moderado</span>
+          <span><span style={{ ...legendDot, background: C.redBg, border: `1px solid ${C.red}` }} /> grave</span>
+          <span style={{ color: C.sub }}>· umbrales según tipo (ver Configuración)</span>
         </div>
       </Card>
 
@@ -478,7 +545,9 @@ function InventarioSemanal({ onSaved, avisos, meds, medByV }) {
                 const real = Number(r.real || 0), d07 = Number(r.d07 || 0), maestro = Number(r.maestro || 0);
                 const filled = r.real !== "" || r.d07 !== "" || r.maestro !== "";
                 const dRD = real - d07, dDM = d07 - maestro;
-                const lvl = discColor(dRD) === "crit" || discColor(dDM) === "crit" ? "crit" : (discColor(dRD) === "warn" || discColor(dDM) === "warn" ? "warn" : "none");
+                const cat = medCat(r.codigoV, grupo);
+                const nRD = nivelDescuadre(dRD, cat, config), nDM = nivelDescuadre(dDM, cat, config);
+                const lvl = nivelPeor(nRD, nDM); // prevalece el color de mayor gravedad
                 const sl = filled ? stockLevel(real, medByV[r.codigoV]) : null;
                 return (
                   <tr key={r.codigoV} style={{ background: filled ? rowBg[lvl] : "#fff" }}>
@@ -487,8 +556,8 @@ function InventarioSemanal({ onSaved, avisos, meds, medByV }) {
                     <td style={td}><input value={r.real} onChange={(e) => set(i, "real", e.target.value)} style={miniInput} placeholder="—" /></td>
                     <td style={td}><input value={r.d07} onChange={(e) => set(i, "d07", e.target.value)} style={miniInput} placeholder="—" /></td>
                     <td style={td}><input value={r.maestro} onChange={(e) => set(i, "maestro", e.target.value)} style={miniInput} placeholder="—" /></td>
-                    <td style={td}>{filled ? <Badge level={discColor(dRD)}>{dRD > 0 ? "+" : ""}{dRD}</Badge> : "—"}</td>
-                    <td style={td}>{filled ? <Badge level={discColor(dDM)}>{dDM > 0 ? "+" : ""}{dDM}</Badge> : "—"}</td>
+                    <td style={td}>{filled ? <Badge level={nRD}>{dRD > 0 ? "+" : ""}{dRD}</Badge> : "—"}</td>
+                    <td style={td}>{filled ? <Badge level={nDM}>{dDM > 0 ? "+" : ""}{dDM}</Badge> : "—"}</td>
                     <td style={td}>{sl ? <Badge level={sl.level}>{sl.txt}</Badge> : "—"}</td>
                   </tr>
                 );
@@ -515,14 +584,14 @@ const legendDot = { display: "inline-block", width: 12, height: 12, borderRadius
 /* ===========================================================================
    2) INVENTARIOS ANTERIORES
 =========================================================================== */
-function InventariosAnteriores({ inventarios }) {
+function InventariosAnteriores({ inventarios, config }) {
   const fechas = useMemo(() => [...new Set(inventarios.map((r) => r.fecha))].sort().reverse(), [inventarios]);
   const [sel, setSel] = useState(fechas[0] || "");
   const [grupo, setGrupo] = useState("ORAL");
   useEffect(() => { if (!sel && fechas[0]) setSel(fechas[0]); }, [fechas, sel]);
 
   const filas = inventarios.filter((r) => r.fecha === sel && r.grupo === grupo);
-  const descPorFecha = (f) => inventarios.filter((r) => r.fecha === f && (discColor(r.descRealD07) !== "none" || discColor(r.descD07Maestro) !== "none")).length;
+  const descPorFecha = (f) => inventarios.filter((r) => r.fecha === f && hayDescuadre(r)).length;
 
   return (
     <div>
@@ -555,14 +624,16 @@ function InventariosAnteriores({ inventarios }) {
                 </tr></thead>
                 <tbody>
                   {filas.map((r) => {
-                    const lvl = discColor(r.descRealD07) === "crit" || discColor(r.descD07Maestro) === "crit" ? "crit" : (discColor(r.descRealD07) === "warn" || discColor(r.descD07Maestro) === "warn" ? "warn" : "none");
+                    const cat = medCat(r.codigoV, r.grupo);
+                    const nRD = nivelDescuadre(r.descRealD07, cat, config), nDM = nivelDescuadre(r.descD07Maestro, cat, config);
+                    const lvl = nivelPeor(nRD, nDM); // prevalece el color de mayor gravedad
                     return (
                       <tr key={r.id} style={{ background: rowBg[lvl] }}>
                         <td style={{ ...td, fontFamily: "monospace", fontSize: 12 }}>{r.codigoV}</td>
                         <td style={td}>{r.nombre}</td>
                         <td style={td}>{r.real}</td><td style={td}>{r.d07}</td><td style={td}>{r.maestro}</td>
-                        <td style={td}><Badge level={discColor(r.descRealD07)}>{r.descRealD07 > 0 ? "+" : ""}{r.descRealD07}</Badge></td>
-                        <td style={td}><Badge level={discColor(r.descD07Maestro)}>{r.descD07Maestro > 0 ? "+" : ""}{r.descD07Maestro}</Badge></td>
+                        <td style={td}><Badge level={nRD}>{r.descRealD07 > 0 ? "+" : ""}{r.descRealD07}</Badge></td>
+                        <td style={td}><Badge level={nDM}>{r.descD07Maestro > 0 ? "+" : ""}{r.descD07Maestro}</Badge></td>
                       </tr>
                     );
                   })}
@@ -1322,7 +1393,7 @@ function Inicio({ inventarios, pedidos, resumenAlertas, avisosRepo, goTo }) {
   const ultima = fechas[0];
   const dias = ultima ? Math.floor((Date.now() - new Date(ultima).getTime()) / 86400000) : null;
   const ultInv = inventarios.filter((r) => r.fecha === ultima);
-  const descuadres = ultInv.filter((r) => discColor(r.descRealD07) !== "none" || discColor(r.descD07Maestro) !== "none");
+  const descuadres = ultInv.filter((r) => hayDescuadre(r));
   const descOral = descuadres.filter((r) => r.grupo === "ORAL").length;
   const descIV = descuadres.filter((r) => r.grupo === "IV").length;
   const sinDesc = ultInv.length - descuadres.length;
@@ -1408,6 +1479,7 @@ function AlertasView({ alertas, onEstado, onPedir }) {
     if (!verCerradas && a.estado !== "pendiente") return false;
     if (tipo === "todos") return true;
     if (tipo === "pedido") return a.tipo === "pedido";
+    if (tipo === "descuadre") return a.tipo === "descuadre";
     return String(a.codigos || "").split(/\s+/).includes(tipo);
   });
   const pend = alertas.filter((a) => a.estado === "pendiente").length;
@@ -1420,6 +1492,7 @@ function AlertasView({ alertas, onEstado, onPedir }) {
           <select style={{ ...inputStyle, width: "auto" }} value={tipo} onChange={(e) => setTipo(e.target.value)}>
             <option value="todos">Todos los tipos</option>
             <option value="pedido">Pedido (reposición)</option>
+            <option value="descuadre">Descuadre (inventario)</option>
             {codigos.map((c) => <option key={c} value={c}>{c}{ERROR_CATALOG[c] ? ` · ${ERROR_CATALOG[c].nombre}` : ""}</option>)}
           </select>
           <label style={{ display: "inline-flex", gap: 6, alignItems: "center", fontSize: 13, color: C.text, cursor: "pointer" }}>
@@ -1444,8 +1517,9 @@ function AlertasView({ alertas, onEstado, onPedir }) {
               {filtradas.length === 0 && <tr><td colSpan={8} style={{ ...td, textAlign: "center", color: C.sub, padding: 26 }}>Sin alertas para este filtro.</td></tr>}
               {filtradas.map((a) => (
                 <tr key={a.id} style={{ background: a.estado !== "pendiente" ? "#F9FAFB" : (rowBg[a.nivel] || "#fff") }}>
-                  <td style={td}><Badge level={a.nivel || "none"}>{a.nivel === "crit" ? "Crítica" : a.nivel === "warn" ? "Vigilar" : "—"}</Badge></td>
-                  <td style={td}>{a.tipo === "pedido" ? <Badge level="info">Pedido</Badge> : (
+                  <td style={td}><Badge level={a.nivel || "none"}>{a.nivel === "crit" ? "Crítica" : a.nivel === "orange" ? "Moderada" : a.nivel === "warn" ? "Vigilar" : "—"}</Badge></td>
+                  <td style={td}>{a.tipo === "pedido" ? <Badge level="info">Pedido</Badge>
+                    : a.tipo === "descuadre" ? <Badge level={a.nivel || "warn"}>Descuadre</Badge> : (
                     <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
                       {String(a.codigos || "").split(/\s+/).filter(Boolean).map((c) => <Badge key={c} level={ERROR_CATALOG[c] ? ERROR_CATALOG[c].nivel : "none"}>{c}</Badge>)}
                     </div>
@@ -1477,6 +1551,69 @@ function AlertasView({ alertas, onEstado, onPedir }) {
 }
 
 /* ===========================================================================
+   CONFIGURACIÓN (#6) — umbrales de color de descuadre y cuándo generan alerta
+=========================================================================== */
+function ConfiguracionView({ config, onSave }) {
+  const [c, setC] = useState(() => mergeConfig(config));
+  const [saving, setSaving] = useState(false);
+  const [ok, setOk] = useState(false);
+  useEffect(() => { setC(mergeConfig(config)); }, [config]);
+
+  const cats = [["oral", "Orales", <Pill size={15} key="p" />], ["iv", "Intravenosos", <Syringe size={15} key="s" />], ["fenta", "Fentanilo 150 mcg/3mL (V07610)", <Syringe size={15} key="f" />]];
+  const setUmbral = (cat, campo, val) => { setOk(false); setC((p) => ({ ...p, descuadre: { ...p.descuadre, [cat]: { ...p.descuadre[cat], [campo]: val.replace(/[^\d]/g, "") } } })); };
+  const setAlerta = (nivel, val) => { setOk(false); setC((p) => ({ ...p, alertaDescuadre: { ...p.alertaDescuadre, [nivel]: val } })); };
+  const guardar = async () => { setSaving(true); await onSave(mergeConfig(c)); setSaving(false); setOk(true); };
+
+  return (
+    <div>
+      <SectionTitle title="Configuración" desc="Ajusta cuándo un descuadre es leve, moderado o grave, y cuándo genera una alerta."
+        right={<button style={{ ...btnPrimary, opacity: saving ? 0.6 : 1 }} disabled={saving} onClick={guardar}><Save size={16} /> {saving ? "Guardando…" : "Guardar configuración"}</button>} />
+      {ok && <div style={{ background: C.greenBg, color: C.green, borderRadius: 10, padding: "10px 14px", marginBottom: 16, fontSize: 13, fontWeight: 600, display: "flex", gap: 8, alignItems: "center" }}><CheckCircle2 size={16} /> Configuración guardada.</div>}
+
+      <Card style={{ marginBottom: 16 }}>
+        <div style={{ fontWeight: 700, color: C.text, marginBottom: 4 }}>Umbrales de descuadre por tipo</div>
+        <div style={{ fontSize: 13, color: C.sub, marginBottom: 14 }}>Un descuadre de <b>0</b> = sin descuadre. Los números marcan a partir de cuántas unidades empieza cada color.</div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 640 }}>
+            <thead><tr>
+              <th style={th}>Tipo</th>
+              <th style={th}><Badge level="warn">Amarillo (leve)</Badge></th>
+              <th style={th}><Badge level="orange">Naranja (moderado) a partir de</Badge></th>
+              <th style={th}><Badge level="crit">Rojo (grave) a partir de</Badge></th>
+            </tr></thead>
+            <tbody>
+              {cats.map(([k, label, ic]) => {
+                const o = Number(c.descuadre[k].orange), cr = Number(c.descuadre[k].crit);
+                return (
+                  <tr key={k}>
+                    <td style={{ ...td, fontWeight: 600 }}><span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>{ic}{label}</span></td>
+                    <td style={{ ...td, color: C.sub }}>1 a {Math.max(1, o - 1)}</td>
+                    <td style={td}><input value={c.descuadre[k].orange} onChange={(e) => setUmbral(k, "orange", e.target.value)} style={miniInput} /> <span style={{ color: C.sub, fontSize: 12 }}>(hasta {Math.max(o, cr - 1)})</span></td>
+                    <td style={td}><input value={c.descuadre[k].crit} onChange={(e) => setUmbral(k, "crit", e.target.value)} style={miniInput} /> <span style={{ color: C.sub, fontSize: 12 }}>o más</span></td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+      <Card>
+        <div style={{ fontWeight: 700, color: C.text, marginBottom: 4 }}>¿Cuándo se genera una alerta de descuadre?</div>
+        <div style={{ fontSize: 13, color: C.sub, marginBottom: 14 }}>Al guardar un inventario, se crea una alerta en la pestaña <b>Alertas</b> para los descuadres del nivel marcado.</div>
+        <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
+          {[["warn", "Amarillo (leve)"], ["orange", "Naranja (moderado)"], ["crit", "Rojo (grave)"]].map(([k, label]) => (
+            <label key={k} style={{ display: "inline-flex", gap: 8, alignItems: "center", fontSize: 14, color: C.text, cursor: "pointer", fontWeight: 600 }}>
+              <input type="checkbox" checked={!!c.alertaDescuadre[k]} onChange={(e) => setAlerta(k, e.target.checked)} /> {label}
+            </label>
+          ))}
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+/* ===========================================================================
    APP PRINCIPAL
 =========================================================================== */
 const NAV = [
@@ -1488,6 +1625,7 @@ const NAV = [
   ["pedidos", "Registro de pedidos", PackageSearch],
   ["caducados", "Med. caducados", CalendarX],
   ["incidencias", "Incidencias", AlertTriangle],
+  ["configuracion", "Configuración", Settings],
 ];
 
 export default function App() {
@@ -1509,6 +1647,7 @@ export default function App() {
   const [incidencias, setIncidencias] = useState(() => lsGet(LS.data("Incidencias"), []));
   const [meds, setMeds] = useState(() => lsGet(LS.data("Catalogo"), ALL_MEDS));
   const [alertas, setAlertas] = useState(() => lsGet(LS.data("Alertas"), []));
+  const [config, setConfig] = useState(() => mergeConfig(lsGet(LS.data("Config"), null))); // niveles de descuadre/alerta (#5/#6/#22)
   const [resumenAlertas, setResumenAlertas] = useState(null);
   const [avisosRepo, setAvisosRepo] = useState([]);
   const [incPrefill, setIncPrefill] = useState(null);
@@ -1525,6 +1664,7 @@ export default function App() {
   useEffect(() => { lsSet(LS.data("Incidencias"), incidencias); }, [incidencias]);
   useEffect(() => { lsSet(LS.data("Catalogo"), meds); }, [meds]);
   useEffect(() => { lsSet(LS.data("Alertas"), alertas); }, [alertas]);
+  useEffect(() => { lsSet(LS.data("Config"), config); }, [config]);
 
   // Vuelca la cola de escrituras pendientes al backend (idempotente por id)
   const flush = async () => { const restantes = await outboxFlush(api); setPendientes(restantes); return restantes; };
@@ -1549,6 +1689,11 @@ export default function App() {
         const ale = await api.list("Alertas");
         if (ale && ale.rows) setAlertas(ale.rows);
       } catch (e3) { /* backend sin hoja Alertas: se mantienen las locales */ }
+      try {
+        const cfg = await api.list("Config");
+        const row = cfg && cfg.rows && cfg.rows.find((r) => String(r.id) === "global");
+        if (row && row.json) setConfig(mergeConfig(JSON.parse(row.json)));
+      } catch (e4) { /* backend sin hoja Config: se mantiene la config local */ }
       notify("Datos cargados desde Google Sheets");
     } catch (e) { notify("Sin conexión a Sheets — trabajando en local", "warn"); }
     setSyncing(false);
@@ -1574,6 +1719,21 @@ export default function App() {
   };
   const pedirDesdeAlerta = (a) => { setPedidoPrefill({ estupefaciente: `${a.codigoV} · ${a.medicamento}`, _alertaId: a.id }); setView("pedidos"); };
 
+  // Guardar configuración (#6). Se guarda ya en este equipo; e intenta guardarla
+  // compartida en Google Sheets (best-effort, sin bloquear la cola: si el backend
+  // aún no tiene la hoja "Config", queda solo local hasta que se actualice el backend).
+  const guardarConfig = async (nuevo) => {
+    setConfig(nuevo);
+    try {
+      if (api.connected() && !isOffline()) {
+        const row = { id: "global", json: JSON.stringify(nuevo) };
+        await api.append("Config", row);          // crea la fila si no existe (idempotente)
+        await api.update("Config", "global", row); // asegura el valor actual
+      }
+    } catch (e) { /* backend sin hoja Config aún: la config queda guardada en este equipo */ }
+    notify("Configuración guardada" + ((!api.connected() || isOffline()) ? " (en este equipo)" : ""));
+  };
+
   // Sufijo de aviso cuando la escritura queda pendiente de sincronizar
   const pendSuffix = () => (!api.connected() || isOffline()) ? " · pendiente de sincronizar" : "";
 
@@ -1590,7 +1750,20 @@ export default function App() {
       setAlertas((prev) => mergeAlertas(prev, alertRows));
       await enqueue({ action: "appendMany", sheet: "Alertas", rows: alertRows });
     }
-    notify(`Inventario guardado (${filas.length} líneas)${avisos.length ? ` · ${avisos.length} avisos de reposición` : ""}${pendSuffix()}`);
+    // Alertas de descuadre (#22): una por columna de descuadre cuyo nivel tenga alerta activada en Configuración
+    const alertDesc = [];
+    filas.forEach((f) => {
+      const cat = medCat(f.codigoV, f.grupo);
+      [["Real−D07", f.descRealD07], ["D07−Maestro", f.descD07Maestro]].forEach(([etq, val]) => {
+        const nivel = nivelDescuadre(val, cat, config);
+        if (nivel !== "none" && config.alertaDescuadre && config.alertaDescuadre[nivel]) alertDesc.push(alertaDescuadre(f, fecha, etq, val, nivel));
+      });
+    });
+    if (alertDesc.length) {
+      setAlertas((prev) => mergeAlertas(prev, alertDesc));
+      await enqueue({ action: "appendMany", sheet: "Alertas", rows: alertDesc });
+    }
+    notify(`Inventario guardado (${filas.length} líneas)${avisos.length ? ` · ${avisos.length} avisos de reposición` : ""}${alertDesc.length ? ` · ${alertDesc.length} alertas de descuadre` : ""}${pendSuffix()}`);
   };
 
   // Pedidos
@@ -1687,13 +1860,14 @@ export default function App() {
           </div>
         )}
         {view === "inicio" && <Inicio inventarios={inventarios} pedidos={pedidos} resumenAlertas={resumenAlertas} avisosRepo={avisosRepo} goTo={setView} />}
-        {view === "inventario" && <InventarioSemanal onSaved={guardarInventario} avisos={avisosRepo} meds={meds} medByV={medByV} />}
-        {view === "anteriores" && <InventariosAnteriores inventarios={inventarios} />}
+        {view === "inventario" && <InventarioSemanal onSaved={guardarInventario} avisos={avisosRepo} meds={meds} medByV={medByV} config={config} />}
+        {view === "anteriores" && <InventariosAnteriores inventarios={inventarios} config={config} />}
         {view === "detector" && <DetectorAlertas onResumen={registrarResumenAlertas} onGuardarCruce={guardarCruce} sheetsConnected={connected} onNombrePaciente={() => notify("⚠️ Posible nombre de paciente detectado y excluido del procesamiento", "crit")} />}
         {view === "alertas" && <AlertasView alertas={alertas} onEstado={marcarAlerta} onPedir={pedirDesdeAlerta} />}
         {view === "pedidos" && <RegistroPedidos pedidos={pedidos} onCreate={crearPedido} onUpdate={actualizarPedido} meds={meds} prefill={pedidoPrefill} clearPrefill={() => setPedidoPrefill(null)} />}
         {view === "caducados" && <Caducados caducados={caducados} onCreate={crearCaducado} />}
         {view === "incidencias" && <Incidencias incidencias={incidencias} onCreate={crearIncidencia} onUpdate={actualizarIncidencia} prefill={incPrefill} clearPrefill={() => setIncPrefill(null)} meds={meds} />}
+        {view === "configuracion" && <ConfiguracionView config={config} onSave={guardarConfig} />}
       </main>
 
       {/* AJUSTES */}

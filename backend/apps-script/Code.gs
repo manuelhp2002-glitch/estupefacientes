@@ -36,7 +36,8 @@ var HEADERS = {
   Incidencias: ["id", "tipo", "medicamento", "fechaHora", "movimiento", "cantidad", "sistema", "descripcion", "medida", "estado", "farmaceutico"],
   Cruces: ["id", "medicamento", "codigoV", "fecha", "tipo", "medico", "cantidad", "cantFinal", "usuario", "alertas", "nivel", "intervalo"],
   Catalogo: ["id", "codigoV", "nombre", "grupo", "min", "max"],
-  Alertas: ["id", "origen", "tipo", "codigos", "codigoV", "medicamento", "nivel", "fecha", "detalle", "estado"]
+  Alertas: ["id", "origen", "tipo", "codigos", "codigoV", "medicamento", "nivel", "fecha", "detalle", "estado"],
+  Config: ["id", "json"]
 };
 
 // Guard de privacidad (§1): campos de nota/observación de importación donde NO debe
