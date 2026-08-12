@@ -1573,9 +1573,9 @@ function ConfiguracionView({ config, onSave }) {
 
       <Card style={{ marginBottom: 16 }}>
         <div style={{ fontWeight: 700, color: C.text, marginBottom: 4 }}>Umbrales de descuadre por tipo</div>
-        <div style={{ fontSize: 13, color: C.sub, marginBottom: 14 }}>Un descuadre de <b>0</b> = sin descuadre. Cada número marca a partir de cuántas unidades empieza ese color. Un descuadre por debajo del amarillo se considera sin relevancia (sin color).</div>
+        <div style={{ fontSize: 13, color: C.sub, marginBottom: 14 }}>Un descuadre de <b>0</b> = sin descuadre. Escribe libremente a partir de cuántas unidades empieza cada color: cada color va desde su número hasta justo antes del siguiente, y el rojo no tiene tope. Un descuadre por debajo del amarillo se considera sin relevancia (sin color).</div>
         <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 680 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 620 }}>
             <thead><tr>
               <th style={th}>Tipo</th>
               <th style={th}><Badge level="warn">Amarillo (leve) desde</Badge></th>
@@ -1583,17 +1583,14 @@ function ConfiguracionView({ config, onSave }) {
               <th style={th}><Badge level="crit">Rojo (grave) desde</Badge></th>
             </tr></thead>
             <tbody>
-              {cats.map(([k, label, ic]) => {
-                const w = Number(c.descuadre[k].warn), o = Number(c.descuadre[k].orange), cr = Number(c.descuadre[k].crit);
-                return (
-                  <tr key={k}>
-                    <td style={{ ...td, fontWeight: 600 }}><span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>{ic}{label}</span></td>
-                    <td style={td}><input value={c.descuadre[k].warn} onChange={(e) => setUmbral(k, "warn", e.target.value)} style={miniInput} /> <span style={{ color: C.sub, fontSize: 12 }}>(hasta {Math.max(w, o - 1)})</span></td>
-                    <td style={td}><input value={c.descuadre[k].orange} onChange={(e) => setUmbral(k, "orange", e.target.value)} style={miniInput} /> <span style={{ color: C.sub, fontSize: 12 }}>(hasta {Math.max(o, cr - 1)})</span></td>
-                    <td style={td}><input value={c.descuadre[k].crit} onChange={(e) => setUmbral(k, "crit", e.target.value)} style={miniInput} /> <span style={{ color: C.sub, fontSize: 12 }}>o más</span></td>
-                  </tr>
-                );
-              })}
+              {cats.map(([k, label, ic]) => (
+                <tr key={k}>
+                  <td style={{ ...td, fontWeight: 600 }}><span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>{ic}{label}</span></td>
+                  <td style={td}><input value={c.descuadre[k].warn} onChange={(e) => setUmbral(k, "warn", e.target.value)} style={miniInput} /></td>
+                  <td style={td}><input value={c.descuadre[k].orange} onChange={(e) => setUmbral(k, "orange", e.target.value)} style={miniInput} /></td>
+                  <td style={td}><input value={c.descuadre[k].crit} onChange={(e) => setUmbral(k, "crit", e.target.value)} style={miniInput} /></td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>
