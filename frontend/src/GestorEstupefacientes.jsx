@@ -4,7 +4,7 @@ import {
   Home, ClipboardList, History, ShieldAlert, PackageSearch, CalendarX,
   AlertTriangle, Plus, Save, X, Upload, Search, CheckCircle2, Clock,
   Settings, RefreshCw, Cloud, CloudOff, Truck, FileSpreadsheet, Trash2,
-  ChevronRight, Info, Pill, Syringe, Filter, ArrowRight, ListChecks, Bell, Menu
+  ChevronRight, Info, Pill, Syringe, Filter, ArrowRight, ListChecks, Bell, Menu, Pencil
 } from "lucide-react";
 
 /* ============================================================================
@@ -966,6 +966,21 @@ function estadoPedido(p) {
 }
 const estadoBadge = { Pendiente: "info", Recibido: "ok", Incidencia: "warn", "No servido": "crit" };
 
+// Siguiente nº de vale (#7): coge el vale con el número más alto (ej. "HA1050"),
+// conserva su prefijo y su nº de dígitos, y le suma 1 → "HA1051". Si no hay
+// pedidos aún, devuelve "" para que se escriba a mano la primera vez.
+function nextVale(pedidos) {
+  let best = null; // { num, width, prefix }
+  (pedidos || []).forEach((p) => {
+    const m = String(p.vale || "").match(/^(.*?)(\d+)\s*$/); // prefijo + dígitos finales
+    if (!m) return;
+    const num = parseInt(m[2], 10);
+    if (best == null || num > best.num) best = { num, width: m[2].length, prefix: m[1] };
+  });
+  if (!best) return "";
+  return `${best.prefix}${String(best.num + 1).padStart(best.width, "0")}`;
+}
+
 function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, prefill, clearPrefill }) {
   const [openNew, setOpenNew] = useState(false);
   const [openRecep, setOpenRecep] = useState(null);
@@ -973,21 +988,38 @@ function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, prefill, clearPref
   const [r, setR] = useState({});
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
+  const [sort, setSort] = useState({ key: "vale", dir: "desc" }); // por defecto: vale más alto arriba (#2/#20)
 
-  // Abre "Nuevo pedido" con la fecha sembrada (obligatoria) y prefill opcional
-  const abrirNuevo = (base) => { setErr(""); setF({ fechaPedido: todayISO(), ...(base || {}) }); setOpenNew(true); };
+  // Abre "Nuevo pedido": siembra la fecha de hoy y el siguiente nº de vale (editable) (#7)
+  const abrirNuevo = (base) => { setErr(""); setF({ fechaPedido: todayISO(), vale: nextVale(pedidos), ...(base || {}) }); setOpenNew(true); };
+  // Abre el mismo formulario para EDITAR un pedido existente: todos los campos, en cualquier momento (#1)
+  const abrirEditar = (p) => { setErr(""); setF({ ...p }); setOpenNew(true); };
   // Prefill desde una alerta de reposición: abre el drawer con el medicamento cargado
   useEffect(() => { if (prefill) abrirNuevo(prefill); /* eslint-disable-next-line */ }, [prefill]);
 
   const cerrarNuevo = () => { setOpenNew(false); setF({}); setErr(""); if (clearPrefill) clearPrefill(); };
   const cerrarRecep = () => { setOpenRecep(null); setR({}); setErr(""); };
 
-  const validNuevo = !!(f.vale && f.vale.trim() && f.estupefaciente && Number(f.udsPedidas) > 0 && f.proveedor && f.fechaPedido);
-  const crear = async () => {
+  // ¿El nº de vale ya lo usa OTRO pedido? (excluye el propio al editar) (#10)
+  const valeDup = useMemo(() => {
+    const v = String(f.vale || "").trim().toLowerCase();
+    if (!v) return false;
+    return pedidos.some((p) => p.id !== f.id && String(p.vale || "").trim().toLowerCase() === v);
+  }, [f.vale, f.id, pedidos]);
+
+  const editando = !!f.id;
+  const validNuevo = !!(f.vale && f.vale.trim() && !valeDup && f.estupefaciente && Number(f.udsPedidas) > 0 && f.proveedor && f.fechaPedido);
+  const guardar = async () => {
     if (!validNuevo || saving) return;
     setSaving(true); setErr("");
     try {
-      await onCreate({ id: uid(), ...f, uds: f.udsPedidas, estado: "Pendiente", noServido: false, avisoLlegada: false });
+      if (editando) {
+        const upd = { ...f, uds: f.udsPedidas };
+        upd.estado = estadoPedido(upd); // recalcula el estado por si cambian las unidades
+        await onUpdate(upd);
+      } else {
+        await onCreate({ id: uid(), ...f, uds: f.udsPedidas, estado: "Pendiente", noServido: false, avisoLlegada: false });
+      }
       cerrarNuevo();
     } catch (e) { setErr("No se pudo guardar el pedido: " + (e && e.message ? e.message : e)); }
     finally { setSaving(false); }
@@ -1008,6 +1040,32 @@ function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, prefill, clearPref
   };
   const avisar = async (p) => { await onUpdate({ ...p, avisoLlegada: true, horaAviso: new Date().toISOString() }); };
 
+  // Ordenación de la tabla (#2/#20): clic en cabecera ordena; repetir invierte
+  const toggleSort = (key) => setSort((s) => (s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" }));
+  const sortVal = (p, key) => {
+    if (key === "vale") { const m = String(p.vale || "").match(/(\d+)\s*$/); return m ? parseInt(m[1], 10) : String(p.vale || "").toLowerCase(); }
+    if (key === "estado") return estadoPedido(p);
+    if (key === "fechaPedido") { const d = toDate(p.fechaPedido); return d ? d.getTime() : 0; }
+    if (key === "udsPedidas") return Number(p.udsPedidas) || 0;
+    if (key === "udsRecibidas") return (p.udsRecibidas == null || p.udsRecibidas === "") ? -1 : Number(p.udsRecibidas);
+    return String(p[key] || "").toLowerCase();
+  };
+  const pedidosOrdenados = useMemo(() => {
+    const arr = [...pedidos];
+    arr.sort((a, b) => {
+      const va = sortVal(a, sort.key), vb = sortVal(b, sort.key);
+      const c = (typeof va === "number" && typeof vb === "number") ? va - vb : String(va).localeCompare(String(vb), "es", { numeric: true });
+      return sort.dir === "asc" ? c : -c;
+    });
+    return arr;
+    // eslint-disable-next-line
+  }, [pedidos, sort]);
+  const ThSort = ({ label, k, extra }) => (
+    <th style={{ ...th, cursor: "pointer", userSelect: "none", ...(extra || {}) }} onClick={() => toggleSort(k)} title="Ordenar por esta columna">
+      {label}{sort.key === k ? (sort.dir === "asc" ? " ▲" : " ▼") : ""}
+    </th>
+  );
+
   return (
     <div>
       <SectionTitle title="Registro de pedidos" desc="Sustituye el Excel de seguimiento de pedidos a proveedor." right={<button style={btnPrimary} onClick={() => abrirNuevo()}><Plus size={16} /> Nuevo pedido</button>} />
@@ -1015,11 +1073,11 @@ function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, prefill, clearPref
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 900 }}>
             <thead><tr>
-              <th style={th}>Vale</th><th style={th}>CN</th><th style={th}>Estupefaciente</th><th style={th}>Proveedor</th><th style={th}>F. pedido</th><th style={th}>Pedidas</th><th style={th}>Recibidas</th><th style={th}>Estado</th><th style={th}>Acción</th>
+              <ThSort label="Vale" k="vale" /><ThSort label="CN" k="cn" /><ThSort label="Estupefaciente" k="estupefaciente" /><ThSort label="Proveedor" k="proveedor" /><ThSort label="F. pedido" k="fechaPedido" /><ThSort label="Pedidas" k="udsPedidas" /><ThSort label="Recibidas" k="udsRecibidas" /><ThSort label="Estado" k="estado" /><th style={th}>Acción</th>
             </tr></thead>
             <tbody>
               {pedidos.length === 0 && <tr><td colSpan={9} style={{ ...td, textAlign: "center", color: C.sub, padding: 26 }}>Sin pedidos registrados.</td></tr>}
-              {pedidos.map((p) => {
+              {pedidosOrdenados.map((p) => {
                 const est = estadoPedido(p);
                 return (
                   <tr key={p.id}>
@@ -1028,12 +1086,17 @@ function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, prefill, clearPref
                     <td style={td}>{p.udsRecibidas ?? "—"}</td>
                     <td style={td}><Badge level={estadoBadge[est]}>{est}</Badge></td>
                     <td style={td}>
-                      {est === "Pendiente" ? (
-                        <div style={{ display: "flex", gap: 6 }}>
-                          {!p.avisoLlegada && <button style={microBtn} onClick={() => avisar(p)}><Truck size={13} /> Avisar llegada</button>}
-                          <button style={{ ...microBtn, background: C.accent, color: "#fff", border: "none" }} onClick={() => { setErr(""); setOpenRecep(p); setR({ fechaEntrada: todayISO(), udsRecibidas: p.udsPedidas }); }}>Recepcionar</button>
-                        </div>
-                      ) : <button style={microBtn} onClick={() => { setErr(""); setOpenRecep(p); setR({ fechaEntrada: p.fechaEntrada || todayISO(), udsRecibidas: p.udsRecibidas ?? p.udsPedidas, farmaceutico: p.farmaceutico, incidencias: p.incidencias, noServido: p.noServido }); }}>Editar</button>}
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                        {est === "Pendiente" ? (
+                          <>
+                            {!p.avisoLlegada && <button style={microBtn} onClick={() => avisar(p)}><Truck size={13} /> Avisar llegada</button>}
+                            <button style={{ ...microBtn, background: C.accent, color: "#fff", border: "none" }} onClick={() => { setErr(""); setOpenRecep(p); setR({ fechaEntrada: todayISO(), udsRecibidas: p.udsPedidas }); }}>Recepcionar</button>
+                          </>
+                        ) : (
+                          <button style={microBtn} onClick={() => { setErr(""); setOpenRecep(p); setR({ fechaEntrada: p.fechaEntrada || todayISO(), udsRecibidas: p.udsRecibidas ?? p.udsPedidas, farmaceutico: p.farmaceutico, incidencias: p.incidencias, noServido: p.noServido }); }}>Recepción</button>
+                        )}
+                        <button style={microBtn} onClick={() => abrirEditar(p)} title="Editar los datos del pedido"><Pencil size={13} /> Editar</button>
+                      </div>
                     </td>
                   </tr>
                 );
@@ -1043,11 +1106,16 @@ function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, prefill, clearPref
         </div>
       </Card>
 
-      {/* Nuevo pedido */}
-      <Drawer open={openNew} title="Nuevo pedido" onClose={cerrarNuevo}
-        footer={<><button style={btnGhost} onClick={cerrarNuevo}>Cancelar</button><button style={{ ...btnPrimary, opacity: validNuevo && !saving ? 1 : 0.5 }} disabled={!validNuevo || saving} onClick={crear}><Save size={15} /> {saving ? "Guardando…" : "Crear"}</button></>}>
+      {/* Nuevo / Editar pedido */}
+      <Drawer open={openNew} title={editando ? "Editar pedido" : "Nuevo pedido"} onClose={cerrarNuevo}
+        footer={<><button style={btnGhost} onClick={cerrarNuevo}>Cancelar</button><button style={{ ...btnPrimary, opacity: validNuevo && !saving ? 1 : 0.5 }} disabled={!validNuevo || saving} onClick={guardar}><Save size={15} /> {saving ? "Guardando…" : (editando ? "Guardar cambios" : "Crear")}</button></>}>
         {err && <div style={errBox}>{err}</div>}
-        <Field label="Nº de vale"><input style={reqStyle(!(f.vale && f.vale.trim()))} value={f.vale || ""} onChange={(e) => setF({ ...f, vale: e.target.value })} /></Field>
+        <Field label="Nº de vale">
+          <input style={reqStyle(!(f.vale && f.vale.trim()) || valeDup)} value={f.vale || ""} onChange={(e) => setF({ ...f, vale: e.target.value })} />
+          {valeDup
+            ? <div style={{ color: C.red, fontSize: 12, marginTop: 5 }}>Ya existe un pedido con este nº de vale.</div>
+            : (!editando && <div style={{ color: C.sub, fontSize: 12, marginTop: 5 }}>Se ha puesto el siguiente número automáticamente. Puedes cambiarlo si necesitas otro.</div>)}
+        </Field>
         <Field label="CN (Código Nacional)"><input style={inputStyle} value={f.cn || ""} onChange={(e) => setF({ ...f, cn: e.target.value })} /></Field>
         <Field label="Estupefaciente (Código V + nombre)">
           <select style={reqStyle(!f.estupefaciente)} value={f.estupefaciente || ""} onChange={(e) => setF({ ...f, estupefaciente: e.target.value })}>
