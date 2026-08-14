@@ -644,18 +644,57 @@ const legendDot = { display: "inline-block", width: 12, height: 12, borderRadius
 /* ===========================================================================
    2) INVENTARIOS ANTERIORES
 =========================================================================== */
-function InventariosAnteriores({ inventarios, config }) {
+function InventariosAnteriores({ inventarios, config, medByV, onEdit, onCrearIncidencia }) {
   const fechas = useMemo(() => [...new Set(inventarios.map((r) => r.fecha))].sort().reverse(), [inventarios]);
   const [sel, setSel] = useState(fechas[0] || "");
   const [grupo, setGrupo] = useState("ORAL");
+  const [editando, setEditando] = useState(false);
+  const [draft, setDraft] = useState({});
+  const [saving, setSaving] = useState(false);
   useEffect(() => { if (!sel && fechas[0]) setSel(fechas[0]); }, [fechas, sel]);
+  useEffect(() => { setEditando(false); setDraft({}); }, [sel, grupo]); // salir de edición al cambiar de fecha/grupo
 
   const filas = inventarios.filter((r) => r.fecha === sel && r.grupo === grupo);
   const descPorFecha = (f) => inventarios.filter((r) => r.fecha === f && hayDescuadre(r)).length;
 
+  const num = (v) => (v === "" || v == null ? 0 : Number(v));
+  const val = (r, campo) => (editando && draft[r.id] != null ? draft[r.id][campo] : r[campo]); // valor efectivo (borrador si se edita)
+  const setCampo = (id, campo, v) => setDraft((prev) => ({ ...prev, [id]: { ...prev[id], [campo]: v.replace(/[^\d-]/g, "") } }));
+
+  const empezarEdicion = () => { setDraft(Object.fromEntries(filas.map((r) => [r.id, { real: r.real, d07: r.d07, maestro: r.maestro }]))); setEditando(true); };
+  const cancelar = () => { setEditando(false); setDraft({}); };
+  const guardar = async () => {
+    setSaving(true);
+    const rows = filas.map((r) => {
+      const real = num(val(r, "real")), d07 = num(val(r, "d07")), maestro = num(val(r, "maestro"));
+      return { ...r, real, d07, maestro, descRealD07: real - d07, descD07Maestro: d07 - maestro };
+    });
+    await onEdit(rows);
+    setSaving(false); setEditando(false); setDraft({});
+  };
+
+  // #4: abre el formulario de Incidencias ya rellenado con el descuadre elegido (ATHOS o DRAGO)
+  const incidenciaDesde = (r, etiqueta, sistema, valor) => onCrearIncidencia({
+    tipo: "Cantidad incorrecta",
+    medicamento: `${r.codigoV} · ${r.nombre}`,
+    sistema, cantidad: Math.abs(valor),
+    fechaHora: String(r.fecha || "").slice(0, 10) + "T00:00",
+    movimiento: `Inventario ${fmtDate(r.fecha)}: REAL ${r.real} · D07 ${r.d07} · MAESTRO ${r.maestro}`,
+    descripcion: `Descuadre en el inventario del ${fmtDate(r.fecha)} — ${etiqueta}: ${valor > 0 ? "+" : ""}${valor} uds (${r.codigoV} · ${r.nombre}).`,
+  });
+
   return (
     <div>
-      <SectionTitle title="Inventarios anteriores" desc="Consulta en solo lectura de inventarios guardados." right={<GroupToggle value={grupo} onChange={setGrupo} />} />
+      <SectionTitle title="Inventarios anteriores" desc="Consulta, edición de recuentos y reposición de inventarios guardados."
+        right={<div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <GroupToggle value={grupo} onChange={setGrupo} />
+          {filas.length > 0 && (editando ? (<>
+            <button style={btnGhost} onClick={cancelar} disabled={saving}>Cancelar</button>
+            <button style={{ ...btnPrimary, opacity: saving ? 0.6 : 1 }} disabled={saving} onClick={guardar}><Save size={15} /> {saving ? "Guardando…" : "Guardar cambios"}</button>
+          </>) : (
+            <button style={btnGhost} onClick={empezarEdicion}><Pencil size={15} /> Editar recuentos</button>
+          ))}
+        </div>} />
       {fechas.length === 0 ? (
         <Card><Empty icon={<History size={26} />} text="Aún no hay inventarios guardados. Registra uno en «Inventario semanal»." /></Card>
       ) : (
@@ -676,28 +715,46 @@ function InventariosAnteriores({ inventarios, config }) {
               );
             })}
           </Card>
-          <Card style={{ flex: 1, minWidth: 460, padding: 0, overflow: "hidden", alignSelf: "flex-start" }}>
+          <Card style={{ flex: 1, minWidth: 520, padding: 0, overflow: "hidden", alignSelf: "flex-start" }}>
+            {editando && <div style={{ padding: "10px 16px", background: "#EEF0FF", fontSize: 12, color: C.accent, fontWeight: 600 }}>Editando recuentos del {fmtDate(sel)} · {grupo === "ORAL" ? "Orales" : "Intravenosos"} — los descuadres se recalculan solos.</div>}
             <div style={{ overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 620 }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 860 }}>
                 <thead><tr>
-                  <th style={th}>Código V</th><th style={th}>Medicamento</th><th style={th}>REAL</th><th style={th}>D07</th><th style={th}>MAESTRO</th><th style={th}>Real−D07</th><th style={th}>D07−Maestro</th>
+                  <th style={th}>Código V</th><th style={th}>Medicamento</th><th style={th}>REAL</th><th style={th}>D07</th><th style={th}>MAESTRO</th><th style={th}>Real−D07</th><th style={th}>D07−Maestro</th><th style={th}>¿Pedir?</th>{!editando && <th style={th}>Incidencia</th>}
                 </tr></thead>
                 <tbody>
+                  {filas.length === 0 && <tr><td colSpan={editando ? 8 : 9} style={{ ...td, textAlign: "center", color: C.sub }}>Sin datos para esta fecha y grupo.</td></tr>}
                   {filas.map((r) => {
+                    const real = num(val(r, "real")), d07 = num(val(r, "d07")), maestro = num(val(r, "maestro"));
+                    const dRD = real - d07, dDM = d07 - maestro;
                     const cat = medCat(r.codigoV, r.grupo);
-                    const nRD = nivelDescuadre(r.descRealD07, cat, config), nDM = nivelDescuadre(r.descD07Maestro, cat, config);
+                    const nRD = nivelDescuadre(dRD, cat, config), nDM = nivelDescuadre(dDM, cat, config);
                     const lvl = nivelPeor(nRD, nDM); // prevalece el color de mayor gravedad
+                    const sl = stockLevel(real, medByV[r.codigoV]);
                     return (
                       <tr key={r.id} style={{ background: rowBg[lvl] }}>
                         <td style={{ ...td, fontFamily: "monospace", fontSize: 12 }}>{r.codigoV}</td>
-                        <td style={td}>{r.nombre}</td>
-                        <td style={td}>{r.real}</td><td style={td}>{r.d07}</td><td style={td}>{r.maestro}</td>
-                        <td style={td}><Badge level={nRD}>{r.descRealD07 > 0 ? "+" : ""}{r.descRealD07}</Badge></td>
-                        <td style={td}><Badge level={nDM}>{r.descD07Maestro > 0 ? "+" : ""}{r.descD07Maestro}</Badge></td>
+                        <td style={{ ...td, minWidth: 200 }}>{r.nombre}</td>
+                        {editando ? (<>
+                          <td style={td}><input value={val(r, "real")} onChange={(e) => setCampo(r.id, "real", e.target.value)} style={miniInput} /></td>
+                          <td style={td}><input value={val(r, "d07")} onChange={(e) => setCampo(r.id, "d07", e.target.value)} style={miniInput} /></td>
+                          <td style={td}><input value={val(r, "maestro")} onChange={(e) => setCampo(r.id, "maestro", e.target.value)} style={miniInput} /></td>
+                        </>) : (<>
+                          <td style={td}>{r.real}</td><td style={td}>{r.d07}</td><td style={td}>{r.maestro}</td>
+                        </>)}
+                        <td style={td}><Badge level={nRD}>{dRD > 0 ? "+" : ""}{dRD}</Badge></td>
+                        <td style={td}><Badge level={nDM}>{dDM > 0 ? "+" : ""}{dDM}</Badge></td>
+                        <td style={td}>{sl ? <Badge level={sl.level}>{sl.txt}</Badge> : "—"}</td>
+                        {!editando && <td style={td}>
+                          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                            {dRD !== 0 && <button style={microBtn} onClick={() => incidenciaDesde(r, "Real−D07", "ATHOS SADE", dRD)}><AlertTriangle size={12} /> Real−D07</button>}
+                            {dDM !== 0 && <button style={microBtn} onClick={() => incidenciaDesde(r, "D07−Maestro", "DRAGO Farma", dDM)}><AlertTriangle size={12} /> D07−Maestro</button>}
+                            {dRD === 0 && dDM === 0 && <span style={{ color: C.sub, fontSize: 12 }}>—</span>}
+                          </div>
+                        </td>}
                       </tr>
                     );
                   })}
-                  {filas.length === 0 && <tr><td colSpan={7} style={{ ...td, textAlign: "center", color: C.sub }}>Sin datos para esta fecha y grupo.</td></tr>}
                 </tbody>
               </table>
             </div>
@@ -2034,6 +2091,21 @@ export default function App() {
     notify(`Inventario guardado (${filas.length} líneas)${avisos.length ? ` · ${avisos.length} avisos de reposición` : ""}${alertDesc.length ? ` · ${alertDesc.length} alertas de descuadre` : ""}${pendSuffix()}`);
   };
 
+  // Editar recuentos de un inventario ya guardado (#3): actualiza estado + Sheet (solo filas cambiadas)
+  const guardarEdicionInventario = async (rows) => {
+    const prev = inventarios;
+    setInventarios((p) => p.map((r) => { const u = rows.find((x) => x.id === r.id); return u || r; }));
+    let n = 0;
+    for (const r of rows) {
+      const antes = prev.find((x) => x.id === r.id);
+      const cambiado = !antes || String(antes.real) !== String(r.real) || String(antes.d07) !== String(r.d07) || String(antes.maestro) !== String(r.maestro);
+      if (cambiado) { await enqueue({ action: "update", sheet: "Inventarios", id: r.id, row: r }); n++; }
+    }
+    notify(`Inventario actualizado (${n} línea${n === 1 ? "" : "s"})${pendSuffix()}`);
+  };
+  // Abrir el formulario de Incidencias con datos prellenados desde un descuadre (#4)
+  const crearIncidenciaDesdeDescuadre = (prefill) => { setIncPrefill(prefill); setView("incidencias"); };
+
   // Pedidos
   const crearPedido = async (p) => {
     const alertaId = p._alertaId; if (alertaId) delete p._alertaId; // enlace opcional a una alerta de reposición
@@ -2129,7 +2201,7 @@ export default function App() {
         )}
         {view === "inicio" && <Inicio inventarios={inventarios} pedidos={pedidos} resumenAlertas={resumenAlertas} avisosRepo={avisosRepo} goTo={setView} />}
         {view === "inventario" && <InventarioSemanal onSaved={guardarInventario} avisos={avisosRepo} meds={meds} medByV={medByV} config={config} />}
-        {view === "anteriores" && <InventariosAnteriores inventarios={inventarios} config={config} />}
+        {view === "anteriores" && <InventariosAnteriores inventarios={inventarios} config={config} medByV={medByV} onEdit={guardarEdicionInventario} onCrearIncidencia={crearIncidenciaDesdeDescuadre} />}
         {view === "detector" && <DetectorAlertas onResumen={registrarResumenAlertas} onGuardarCruce={guardarCruce} sheetsConnected={connected} onNombrePaciente={() => notify("⚠️ Posible nombre de paciente detectado y excluido del procesamiento", "crit")} />}
         {view === "alertas" && <AlertasView alertas={alertas} onEstado={marcarAlerta} onPedir={pedirDesdeAlerta} />}
         {view === "pedidos" && <RegistroPedidos pedidos={pedidos} onCreate={crearPedido} onUpdate={actualizarPedido} meds={meds} cnMap={cnMap} cnCatalogo={cnCatalogo} prefill={pedidoPrefill} clearPrefill={() => setPedidoPrefill(null)} />}
