@@ -142,11 +142,15 @@ const CN_CATALOGO_SEED = [
   { cn: "981365", codigoV: "V00656", proveedor: "COFARTE" },
   { cn: "981373", codigoV: "V00655", proveedor: "COFARTE" },
 ];
-// Fusiona la semilla con la capa guardada (por CN gana la guardada y añade CN nuevos)
-function mergeCn(saved) {
-  const map = new Map(CN_CATALOGO_SEED.map((e) => [String(e.cn), { ...e, cn: String(e.cn) }]));
-  (Array.isArray(saved) ? saved : []).forEach((e) => { if (e && e.cn) map.set(String(e.cn), { ...map.get(String(e.cn)), ...e, cn: String(e.cn) }); });
-  return Array.from(map.values());
+// Normaliza el catálogo CN guardado (la lista guardada MANDA del todo, para que los
+// borrados se respeten). Si no hay nada guardado, usa la semilla por defecto.
+function normalizeCn(saved) {
+  if (!Array.isArray(saved) || !saved.length) return CN_CATALOGO_SEED.map((e) => ({ ...e, cn: String(e.cn) }));
+  return saved.filter((e) => e && e.cn).map((e) => {
+    const o = { cn: String(e.cn).trim(), codigoV: String(e.codigoV || "").trim(), proveedor: String(e.proveedor || "").trim() };
+    if (e.marca && String(e.marca).trim()) o.marca = String(e.marca).trim();
+    return o;
+  });
 }
 
 const TIPOS_INCIDENCIA = [
@@ -1649,12 +1653,32 @@ function AlertasView({ alertas, onEstado, onPedir }) {
 /* ===========================================================================
    CONFIGURACIÓN (#6) — umbrales de color de descuadre y cuándo generan alerta
 =========================================================================== */
-function ConfiguracionView({ config, onSave, cnCatalogo, meds }) {
-  const medByV = useMemo(() => Object.fromEntries((meds || []).map((m) => [m.codigoV, m])), [meds]);
+function ConfiguracionView({ config, onSave, cnCatalogo, meds, onSaveCn }) {
   const [c, setC] = useState(() => mergeConfig(config));
   const [saving, setSaving] = useState(false);
   const [ok, setOk] = useState(false);
   useEffect(() => { setC(mergeConfig(config)); }, [config]);
+
+  // Editor del catálogo CN (#8/#15 — pasito C2)
+  const [cnRows, setCnRows] = useState(() => (cnCatalogo || []).map((e) => ({ ...e })));
+  const [cnSaving, setCnSaving] = useState(false);
+  const [cnMsg, setCnMsg] = useState(null);
+  useEffect(() => { setCnRows((cnCatalogo || []).map((e) => ({ ...e }))); }, [cnCatalogo]);
+  const setCnRow = (i, campo, val) => { setCnMsg(null); setCnRows((prev) => prev.map((r, j) => (j === i ? { ...r, [campo]: val } : r))); };
+  const addCn = () => { setCnMsg(null); setCnRows((prev) => [{ cn: "", codigoV: "", proveedor: "", marca: "" }, ...prev]); };
+  const delCnRow = (i) => { setCnMsg(null); setCnRows((prev) => prev.filter((_, j) => j !== i)); };
+  const guardarCn = async () => {
+    const limpio = cnRows.map((r) => {
+      const o = { cn: String(r.cn || "").trim(), codigoV: String(r.codigoV || "").trim(), proveedor: String(r.proveedor || "").trim() };
+      if (r.marca && String(r.marca).trim()) o.marca = String(r.marca).trim();
+      return o;
+    });
+    if (limpio.some((r) => !r.cn || !r.codigoV)) { setCnMsg({ ok: false, txt: "Cada fila necesita un CN y un estupefaciente. Revisa las filas incompletas." }); return; }
+    const cns = limpio.map((r) => r.cn);
+    const dup = cns.find((x, i) => cns.indexOf(x) !== i);
+    if (dup) { setCnMsg({ ok: false, txt: `El CN ${dup} está repetido. Cada CN debe ser único.` }); return; }
+    setCnSaving(true); await onSaveCn(limpio); setCnSaving(false); setCnMsg({ ok: true, txt: "Lista de CN guardada." });
+  };
 
   const cats = [["oral", "Orales", <Pill size={15} key="p" />], ["iv", "Intravenosos", <Syringe size={15} key="s" />], ["fenta", "Fentanilo 150 mcg/3mL (V07610)", <Syringe size={15} key="f" />]];
   const setUmbral = (cat, campo, val) => { setOk(false); setC((p) => ({ ...p, descuadre: { ...p.descuadre, [cat]: { ...p.descuadre[cat], [campo]: val.replace(/[^\d]/g, "") } } })); };
@@ -1705,20 +1729,39 @@ function ConfiguracionView({ config, onSave, cnCatalogo, meds }) {
       </Card>
 
       <Card style={{ marginTop: 16 }}>
-        <div style={{ fontWeight: 700, color: C.text, marginBottom: 4 }}>Base de datos de Código Nacional (CN)</div>
-        <div style={{ fontSize: 13, color: C.sub, marginBottom: 14 }}>Al escribir un CN en Pedidos o en Caducados, la app rellena sola el medicamento (y el proveedor en pedidos). Hay <b>{(cnCatalogo || []).length}</b> CN cargados. Se guardan compartidos en Google Sheets. <i>(La edición de esta lista desde la app llegará en el siguiente paso.)</i></div>
-        <div style={{ overflowX: "auto", maxHeight: 340, overflowY: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 560 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 4 }}>
+          <div style={{ fontWeight: 700, color: C.text }}>Base de datos de Código Nacional (CN)</div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button style={btnGhost} onClick={addCn}><Plus size={15} /> Añadir CN</button>
+            <button style={{ ...btnPrimary, opacity: cnSaving ? 0.6 : 1 }} disabled={cnSaving} onClick={guardarCn}><Save size={15} /> {cnSaving ? "Guardando…" : "Guardar lista de CN"}</button>
+          </div>
+        </div>
+        <div style={{ fontSize: 13, color: C.sub, marginBottom: 12 }}>Al elegir un estupefaciente en Pedidos se pone su CN; en Caducados, al escribir el CN se pone el nombre. Un medicamento puede tener varios CN (distintos proveedores). Hay <b>{cnRows.length}</b> CN. Recuerda pulsar <b>Guardar lista de CN</b> tras los cambios.</div>
+        {cnMsg && <div style={{ borderRadius: 8, padding: "8px 10px", fontSize: 13, marginBottom: 10, fontWeight: 600, background: cnMsg.ok ? C.greenBg : C.redBg, color: cnMsg.ok ? C.green : C.red }}>{cnMsg.txt}</div>}
+        <div style={{ overflowX: "auto", maxHeight: 440, overflowY: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 660 }}>
             <thead><tr>
-              <th style={th}>CN</th><th style={th}>Medicamento</th><th style={th}>Código V</th><th style={th}>Proveedor habitual</th>
+              <th style={th}>CN</th><th style={th}>Estupefaciente (Código V)</th><th style={th}>Proveedor habitual</th><th style={th}>Marca (opcional)</th><th style={th}></th>
             </tr></thead>
             <tbody>
-              {[...(cnCatalogo || [])].sort((a, b) => String(a.cn).localeCompare(String(b.cn))).map((e) => (
-                <tr key={e.cn}>
-                  <td style={{ ...td, fontFamily: "monospace", fontSize: 12 }}>{e.cn}</td>
-                  <td style={td}>{(medByV[e.codigoV] && medByV[e.codigoV].nombre) || e.marca || "—"}</td>
-                  <td style={{ ...td, fontFamily: "monospace", fontSize: 12 }}>{e.codigoV}</td>
-                  <td style={td}>{e.proveedor || "—"}</td>
+              {cnRows.length === 0 && <tr><td colSpan={5} style={{ ...td, textAlign: "center", color: C.sub }}>No hay CN. Pulsa «Añadir CN».</td></tr>}
+              {cnRows.map((e, i) => (
+                <tr key={i}>
+                  <td style={td}><input value={e.cn || ""} onChange={(ev) => setCnRow(i, "cn", ev.target.value.replace(/[^\d]/g, ""))} style={{ ...inputStyle, width: 100 }} placeholder="000000" /></td>
+                  <td style={td}>
+                    <select value={e.codigoV || ""} onChange={(ev) => setCnRow(i, "codigoV", ev.target.value)} style={{ ...inputStyle, minWidth: 250 }}>
+                      <option value="">—</option>
+                      {(meds || []).map((m) => <option key={m.codigoV} value={m.codigoV}>{m.codigoV} · {m.nombre}</option>)}
+                    </select>
+                  </td>
+                  <td style={td}>
+                    <select value={e.proveedor || ""} onChange={(ev) => setCnRow(i, "proveedor", ev.target.value)} style={{ ...inputStyle, minWidth: 150 }}>
+                      <option value="">—</option>
+                      {PROVEEDORES.map((p) => <option key={p} value={p}>{p}</option>)}
+                    </select>
+                  </td>
+                  <td style={td}><input value={e.marca || ""} onChange={(ev) => setCnRow(i, "marca", ev.target.value)} style={{ ...inputStyle, minWidth: 120 }} /></td>
+                  <td style={td}><button style={iconBtn} title="Borrar este CN" onClick={() => delCnRow(i)}><Trash2 size={16} /></button></td>
                 </tr>
               ))}
             </tbody>
@@ -1764,7 +1807,7 @@ export default function App() {
   const [meds, setMeds] = useState(() => lsGet(LS.data("Catalogo"), ALL_MEDS));
   const [alertas, setAlertas] = useState(() => lsGet(LS.data("Alertas"), []));
   const [config, setConfig] = useState(() => mergeConfig(lsGet(LS.data("Config"), null))); // niveles de descuadre/alerta (#5/#6/#22)
-  const [cnCatalogo, setCnCatalogo] = useState(() => mergeCn(lsGet(LS.data("CnCatalogo"), null))); // CN → medicamento (#8/#15)
+  const [cnCatalogo, setCnCatalogo] = useState(() => normalizeCn(lsGet(LS.data("CnCatalogo"), null))); // CN → medicamento (#8/#15)
   const [resumenAlertas, setResumenAlertas] = useState(null);
   const [avisosRepo, setAvisosRepo] = useState([]);
   const [incPrefill, setIncPrefill] = useState(null);
@@ -1807,11 +1850,10 @@ export default function App() {
         if (cat && cat.rows) {
           const cfgRow = cat.rows.find((r) => String(r.id) === "__config__");
           if (cfgRow && cfgRow.json) { try { setConfig(mergeConfig(JSON.parse(cfgRow.json))); } catch (ej) { /* json corrupto: se mantiene la config local */ } }
-          // Catálogo CN (#8/#15): vive en la fila especial "__cncatalog__". Si aún no
-          // existe, se siembra en el Sheet (una vez) para que la lista viva ahí.
+          // Catálogo CN (#8/#15): vive en la fila especial "__cncatalog__" (la lista
+          // guardada manda del todo). Se escribe al Sheet cuando se guarda en el editor.
           const cnRow = cat.rows.find((r) => String(r.id) === "__cncatalog__");
-          if (cnRow && cnRow.json) { try { setCnCatalogo(mergeCn(JSON.parse(cnRow.json))); } catch (ek) { /* json corrupto: se mantiene el local */ } }
-          else { try { await api.append("Catalogo", { id: "__cncatalog__", codigoV: "(cn)", nombre: "Base de datos CN — no editar a mano", grupo: "", json: JSON.stringify(CN_CATALOGO_SEED) }); } catch (es) { /* se reintenta en otra carga */ } }
+          if (cnRow && cnRow.json) { try { setCnCatalogo(normalizeCn(JSON.parse(cnRow.json))); } catch (ek) { /* json corrupto: se mantiene el local */ } }
           const especiales = new Set(["__config__", "__cncatalog__"]);
           const medRows = cat.rows.filter((r) => !especiales.has(String(r.id)));
           if (medRows.length) setMeds(medRows.map(normalizeMed)); // hoja vacía → se mantiene la semilla
@@ -1860,6 +1902,19 @@ export default function App() {
       }
     } catch (e) { /* sin conexión: la config queda guardada en este equipo */ }
     notify("Configuración guardada" + ((!api.connected() || isOffline()) ? " (en este equipo)" : ""));
+  };
+
+  // Guardar el catálogo CN editado (#8/#15): local + fila "__cncatalog__" de Catalogo (compartido).
+  const guardarCnCatalogo = async (nuevo) => {
+    setCnCatalogo(nuevo);
+    try {
+      if (api.connected() && !isOffline()) {
+        const row = { id: "__cncatalog__", codigoV: "(cn)", nombre: "Base de datos CN — no editar a mano", grupo: "", json: JSON.stringify(nuevo) };
+        await api.append("Catalogo", row);
+        await api.update("Catalogo", "__cncatalog__", row);
+      }
+    } catch (e) { /* sin conexión: queda guardado en este equipo */ }
+    notify("Lista de CN guardada" + ((!api.connected() || isOffline()) ? " (en este equipo)" : ""));
   };
 
   // Sufijo de aviso cuando la escritura queda pendiente de sincronizar
@@ -1995,7 +2050,7 @@ export default function App() {
         {view === "pedidos" && <RegistroPedidos pedidos={pedidos} onCreate={crearPedido} onUpdate={actualizarPedido} meds={meds} cnMap={cnMap} cnCatalogo={cnCatalogo} prefill={pedidoPrefill} clearPrefill={() => setPedidoPrefill(null)} />}
         {view === "caducados" && <Caducados caducados={caducados} onCreate={crearCaducado} meds={meds} cnMap={cnMap} />}
         {view === "incidencias" && <Incidencias incidencias={incidencias} onCreate={crearIncidencia} onUpdate={actualizarIncidencia} prefill={incPrefill} clearPrefill={() => setIncPrefill(null)} meds={meds} />}
-        {view === "configuracion" && <ConfiguracionView config={config} onSave={guardarConfig} cnCatalogo={cnCatalogo} meds={meds} />}
+        {view === "configuracion" && <ConfiguracionView config={config} onSave={guardarConfig} cnCatalogo={cnCatalogo} meds={meds} onSaveCn={guardarCnCatalogo} />}
       </main>
 
       {/* AJUSTES */}
