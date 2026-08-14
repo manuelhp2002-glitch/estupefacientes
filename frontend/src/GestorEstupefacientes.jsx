@@ -287,9 +287,13 @@ const hayDescuadre = (r) => (Number(r.descRealD07) || 0) !== 0 || (Number(r.desc
 
 // nivel de stock frente a min/max
 function stockLevel(real, med) {
-  if (!med || med.max == null || med.min == null || (med.max === 0 && med.min === 0)) return null;
-  if (real >= med.max) return { level: "ok", txt: "Stock óptimo" };
-  if (real >= med.min) return { level: "warn", txt: "Pedir a laboratorio" };
+  if (!med) return null;
+  const max = (med.max === "" || med.max == null) ? null : Number(med.max);
+  const min = (med.min === "" || med.min == null) ? null : Number(med.min);
+  // Sin niveles (vacío) o 0/0 → ese medicamento no genera aviso de reposición (#3/#4)
+  if (max == null || min == null || (max === 0 && min === 0)) return null;
+  if (real >= max) return { level: "ok", txt: "Stock óptimo" };
+  if (real >= min) return { level: "warn", txt: "Pedir a laboratorio" };
   return { level: "crit", txt: "Pedir a cooperativa (urgente)" };
 }
 
@@ -391,7 +395,7 @@ async function outboxFlush(api) {
 function normalizeMed(r) {
   const num = (v) => (v === "" || v == null ? null : Number(v));
   const grupo = String(r.grupo || "").toUpperCase() === "IV" ? "IV" : "ORAL";
-  return { codigoV: String(r.codigoV || "").trim(), nombre: String(r.nombre || "").trim(), grupo, max: num(r.max), min: num(r.min) };
+  return { id: r.id, codigoV: String(r.codigoV || "").trim(), nombre: String(r.nombre || "").trim(), grupo, max: num(r.max), min: num(r.min) };
 }
 
 /* ---------------------------------------------------------------------------
@@ -1653,13 +1657,37 @@ function AlertasView({ alertas, onEstado, onPedir }) {
 /* ===========================================================================
    CONFIGURACIÓN (#6) — umbrales de color de descuadre y cuándo generan alerta
 =========================================================================== */
-function ConfiguracionView({ config, onSave, cnCatalogo, meds, onSaveCn }) {
+function ConfiguracionView({ config, onSave, cnCatalogo, meds, onSaveCn, onSaveNiveles }) {
+  const [tab, setTab] = useState("descuadres");
+  const medByV = useMemo(() => Object.fromEntries((meds || []).map((m) => [m.codigoV, m])), [meds]);
+
+  // --- Descuadres: colores + cuándo se genera alerta ---
   const [c, setC] = useState(() => mergeConfig(config));
   const [saving, setSaving] = useState(false);
   const [ok, setOk] = useState(false);
   useEffect(() => { setC(mergeConfig(config)); }, [config]);
+  const cats = [["oral", "Orales", <Pill size={15} key="p" />], ["iv", "Intravenosos", <Syringe size={15} key="s" />], ["fenta", "Fentanilo 150 mcg/3mL (V07610)", <Syringe size={15} key="f" />]];
+  const setUmbral = (cat, campo, val) => { setOk(false); setC((p) => ({ ...p, descuadre: { ...p.descuadre, [cat]: { ...p.descuadre[cat], [campo]: val.replace(/[^\d]/g, "") } } })); };
+  const setAlerta = (nivel, val) => { setOk(false); setC((p) => ({ ...p, alertaDescuadre: { ...p.alertaDescuadre, [nivel]: val } })); };
+  const guardar = async () => { setSaving(true); await onSave(mergeConfig(c)); setSaving(false); setOk(true); };
 
-  // Editor del catálogo CN (#8/#15 — pasito C2)
+  // --- Niveles de pedido: máximo (laboratorio) y mínimo (COFARTE) por medicamento (#6) ---
+  const [grupoNiv, setGrupoNiv] = useState("ORAL");
+  const [nivRows, setNivRows] = useState(() => (meds || []).map((m) => ({ ...m })));
+  const [nivSaving, setNivSaving] = useState(false);
+  const [nivMsg, setNivMsg] = useState(null);
+  useEffect(() => { setNivRows((meds || []).map((m) => ({ ...m }))); }, [meds]);
+  const setNiv = (codigoV, campo, val) => { setNivMsg(null); setNivRows((prev) => prev.map((m) => (m.codigoV === codigoV ? { ...m, [campo]: val.replace(/[^\d]/g, "") } : m))); };
+  const guardarNiv = async () => {
+    const malo = nivRows.find((m) => m.max !== "" && m.max != null && m.min !== "" && m.min != null && Number(m.min) > Number(m.max));
+    if (malo) { setNivMsg({ ok: false, txt: `En "${malo.nombre}" el mínimo (${malo.min}) es mayor que el máximo (${malo.max}). Corrígelo antes de guardar.` }); return; }
+    setNivSaving(true);
+    await onSaveNiveles(nivRows.map((m) => ({ ...m, min: (m.min === "" || m.min == null) ? "" : Number(m.min), max: (m.max === "" || m.max == null) ? "" : Number(m.max) })));
+    setNivSaving(false); setNivMsg({ ok: true, txt: "Niveles de pedido guardados." });
+  };
+
+  // --- Editor del catálogo CN (#8/#15) ---
+  const [grupoCn, setGrupoCn] = useState("ORAL");
   const [cnRows, setCnRows] = useState(() => (cnCatalogo || []).map((e) => ({ ...e })));
   const [cnSaving, setCnSaving] = useState(false);
   const [cnMsg, setCnMsg] = useState(null);
@@ -1680,94 +1708,133 @@ function ConfiguracionView({ config, onSave, cnCatalogo, meds, onSaveCn }) {
     setCnSaving(true); await onSaveCn(limpio); setCnSaving(false); setCnMsg({ ok: true, txt: "Lista de CN guardada." });
   };
 
-  const cats = [["oral", "Orales", <Pill size={15} key="p" />], ["iv", "Intravenosos", <Syringe size={15} key="s" />], ["fenta", "Fentanilo 150 mcg/3mL (V07610)", <Syringe size={15} key="f" />]];
-  const setUmbral = (cat, campo, val) => { setOk(false); setC((p) => ({ ...p, descuadre: { ...p.descuadre, [cat]: { ...p.descuadre[cat], [campo]: val.replace(/[^\d]/g, "") } } })); };
-  const setAlerta = (nivel, val) => { setOk(false); setC((p) => ({ ...p, alertaDescuadre: { ...p.alertaDescuadre, [nivel]: val } })); };
-  const guardar = async () => { setSaving(true); await onSave(mergeConfig(c)); setSaving(false); setOk(true); };
+  // Filas filtradas por grupo, conservando el índice original de cnRows para poder editarlas
+  const nivFiltrado = nivRows.filter((m) => m.grupo === grupoNiv);
+  const cnConIdx = cnRows.map((e, i) => ({ e, i })).filter(({ e }) => !e.codigoV || ((medByV[e.codigoV] ? medByV[e.codigoV].grupo : "ORAL") === grupoCn));
 
   return (
     <div>
-      <SectionTitle title="Configuración" desc="Ajusta cuándo un descuadre es leve, moderado o grave, y cuándo genera una alerta."
-        right={<button style={{ ...btnPrimary, opacity: saving ? 0.6 : 1 }} disabled={saving} onClick={guardar}><Save size={16} /> {saving ? "Guardando…" : "Guardar configuración"}</button>} />
-      {ok && <div style={{ background: C.greenBg, color: C.green, borderRadius: 10, padding: "10px 14px", marginBottom: 16, fontSize: 13, fontWeight: 600, display: "flex", gap: 8, alignItems: "center" }}><CheckCircle2 size={16} /> Configuración guardada.</div>}
+      <SectionTitle title="Configuración" desc="Ajustes de la app: descuadres, niveles de pedido y códigos nacionales." />
+      <div style={{ display: "inline-flex", background: "#EEF0F6", borderRadius: 10, padding: 3, marginBottom: 18, flexWrap: "wrap", gap: 2 }}>
+        {[["descuadres", "Descuadres"], ["niveles", "Niveles de pedido"], ["cn", "Códigos Nacionales"]].map(([id, label]) => (
+          <button key={id} onClick={() => setTab(id)} style={{ border: "none", cursor: "pointer", padding: "8px 16px", borderRadius: 8, fontWeight: 600, fontSize: 13, background: tab === id ? "#fff" : "transparent", color: tab === id ? C.text : C.sub, boxShadow: tab === id ? "0 1px 3px rgba(0,0,0,0.1)" : "none" }}>{label}</button>
+        ))}
+      </div>
 
-      <Card style={{ marginBottom: 16 }}>
-        <div style={{ fontWeight: 700, color: C.text, marginBottom: 4 }}>Umbrales de descuadre por tipo</div>
-        <div style={{ fontSize: 13, color: C.sub, marginBottom: 14 }}>Un descuadre de <b>0</b> = sin descuadre. Escribe libremente a partir de cuántas unidades empieza cada color: cada color va desde su número hasta justo antes del siguiente, y el rojo no tiene tope. Un descuadre por debajo del amarillo se considera sin relevancia (sin color).</div>
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 620 }}>
-            <thead><tr>
-              <th style={th}>Tipo</th>
-              <th style={th}><Badge level="warn">Amarillo (leve) desde</Badge></th>
-              <th style={th}><Badge level="orange">Naranja (moderado) desde</Badge></th>
-              <th style={th}><Badge level="crit">Rojo (grave) desde</Badge></th>
-            </tr></thead>
-            <tbody>
-              {cats.map(([k, label, ic]) => (
-                <tr key={k}>
-                  <td style={{ ...td, fontWeight: 600 }}><span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>{ic}{label}</span></td>
-                  <td style={td}><input value={c.descuadre[k].warn} onChange={(e) => setUmbral(k, "warn", e.target.value)} style={miniInput} /></td>
-                  <td style={td}><input value={c.descuadre[k].orange} onChange={(e) => setUmbral(k, "orange", e.target.value)} style={miniInput} /></td>
-                  <td style={td}><input value={c.descuadre[k].crit} onChange={(e) => setUmbral(k, "crit", e.target.value)} style={miniInput} /></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      {tab === "descuadres" && <div>
+        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
+          <button style={{ ...btnPrimary, opacity: saving ? 0.6 : 1 }} disabled={saving} onClick={guardar}><Save size={16} /> {saving ? "Guardando…" : "Guardar descuadres"}</button>
         </div>
-      </Card>
+        {ok && <div style={{ background: C.greenBg, color: C.green, borderRadius: 10, padding: "10px 14px", marginBottom: 16, fontSize: 13, fontWeight: 600, display: "flex", gap: 8, alignItems: "center" }}><CheckCircle2 size={16} /> Configuración de descuadres guardada.</div>}
+        <Card style={{ marginBottom: 16 }}>
+          <div style={{ fontWeight: 700, color: C.text, marginBottom: 4 }}>Umbrales de descuadre por tipo</div>
+          <div style={{ fontSize: 13, color: C.sub, marginBottom: 14 }}>Un descuadre de <b>0</b> = sin descuadre. Escribe libremente a partir de cuántas unidades empieza cada color: cada color va desde su número hasta justo antes del siguiente, y el rojo no tiene tope. Un descuadre por debajo del amarillo se considera sin relevancia (sin color).</div>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 620 }}>
+              <thead><tr>
+                <th style={th}>Tipo</th>
+                <th style={th}><Badge level="warn">Amarillo (leve) desde</Badge></th>
+                <th style={th}><Badge level="orange">Naranja (moderado) desde</Badge></th>
+                <th style={th}><Badge level="crit">Rojo (grave) desde</Badge></th>
+              </tr></thead>
+              <tbody>
+                {cats.map(([k, label, ic]) => (
+                  <tr key={k}>
+                    <td style={{ ...td, fontWeight: 600 }}><span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>{ic}{label}</span></td>
+                    <td style={td}><input value={c.descuadre[k].warn} onChange={(e) => setUmbral(k, "warn", e.target.value)} style={miniInput} /></td>
+                    <td style={td}><input value={c.descuadre[k].orange} onChange={(e) => setUmbral(k, "orange", e.target.value)} style={miniInput} /></td>
+                    <td style={td}><input value={c.descuadre[k].crit} onChange={(e) => setUmbral(k, "crit", e.target.value)} style={miniInput} /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+        <Card>
+          <div style={{ fontWeight: 700, color: C.text, marginBottom: 4 }}>¿Cuándo se genera una alerta de descuadre?</div>
+          <div style={{ fontSize: 13, color: C.sub, marginBottom: 14 }}>Al guardar un inventario, se crea una alerta en la pestaña <b>Alertas</b> para los descuadres del nivel marcado.</div>
+          <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
+            {[["warn", "Amarillo (leve)"], ["orange", "Naranja (moderado)"], ["crit", "Rojo (grave)"]].map(([k, label]) => (
+              <label key={k} style={{ display: "inline-flex", gap: 8, alignItems: "center", fontSize: 14, color: C.text, cursor: "pointer", fontWeight: 600 }}>
+                <input type="checkbox" checked={!!c.alertaDescuadre[k]} onChange={(e) => setAlerta(k, e.target.checked)} /> {label}
+              </label>
+            ))}
+          </div>
+        </Card>
+      </div>}
 
-      <Card>
-        <div style={{ fontWeight: 700, color: C.text, marginBottom: 4 }}>¿Cuándo se genera una alerta de descuadre?</div>
-        <div style={{ fontSize: 13, color: C.sub, marginBottom: 14 }}>Al guardar un inventario, se crea una alerta en la pestaña <b>Alertas</b> para los descuadres del nivel marcado.</div>
-        <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
-          {[["warn", "Amarillo (leve)"], ["orange", "Naranja (moderado)"], ["crit", "Rojo (grave)"]].map(([k, label]) => (
-            <label key={k} style={{ display: "inline-flex", gap: 8, alignItems: "center", fontSize: 14, color: C.text, cursor: "pointer", fontWeight: 600 }}>
-              <input type="checkbox" checked={!!c.alertaDescuadre[k]} onChange={(e) => setAlerta(k, e.target.checked)} /> {label}
-            </label>
-          ))}
+      {tab === "niveles" && <div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+          <GroupToggle value={grupoNiv} onChange={setGrupoNiv} />
+          <button style={{ ...btnPrimary, opacity: nivSaving ? 0.6 : 1 }} disabled={nivSaving} onClick={guardarNiv}><Save size={16} /> {nivSaving ? "Guardando…" : "Guardar niveles"}</button>
         </div>
-      </Card>
+        {nivMsg && <div style={{ borderRadius: 8, padding: "8px 10px", fontSize: 13, marginBottom: 12, fontWeight: 600, background: nivMsg.ok ? C.greenBg : C.redBg, color: nivMsg.ok ? C.green : C.red }}>{nivMsg.txt}</div>}
+        <Card style={{ padding: 0, overflow: "hidden" }}>
+          <div style={{ padding: "14px 18px 0", fontSize: 13, color: C.sub }}>Si el stock baja del <b>máximo</b> → pedir a laboratorio. Si baja del <b>mínimo</b> → urgente a COFARTE. Deja las casillas <b>vacías</b> si ese medicamento no debe avisar nunca.</div>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 620 }}>
+              <thead><tr>
+                <th style={th}>Código V</th><th style={th}>Medicamento</th>
+                <th style={th}>Máximo (pedir a laboratorio)</th><th style={th}>Mínimo (urgente a COFARTE)</th>
+              </tr></thead>
+              <tbody>
+                {nivFiltrado.length === 0 && <tr><td colSpan={4} style={{ ...td, textAlign: "center", color: C.sub }}>Sin medicamentos en este grupo.</td></tr>}
+                {nivFiltrado.map((m) => (
+                  <tr key={m.codigoV}>
+                    <td style={{ ...td, fontFamily: "monospace", fontSize: 12 }}>{m.codigoV}</td>
+                    <td style={{ ...td, minWidth: 220 }}>{m.nombre}</td>
+                    <td style={td}><input value={m.max == null ? "" : m.max} onChange={(e) => setNiv(m.codigoV, "max", e.target.value)} style={miniInput} placeholder="—" /></td>
+                    <td style={td}><input value={m.min == null ? "" : m.min} onChange={(e) => setNiv(m.codigoV, "min", e.target.value)} style={miniInput} placeholder="—" /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      </div>}
 
-      <Card style={{ marginTop: 16 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 4 }}>
-          <div style={{ fontWeight: 700, color: C.text }}>Base de datos de Código Nacional (CN)</div>
+      {tab === "cn" && <div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+          <GroupToggle value={grupoCn} onChange={setGrupoCn} />
           <div style={{ display: "flex", gap: 8 }}>
             <button style={btnGhost} onClick={addCn}><Plus size={15} /> Añadir CN</button>
             <button style={{ ...btnPrimary, opacity: cnSaving ? 0.6 : 1 }} disabled={cnSaving} onClick={guardarCn}><Save size={15} /> {cnSaving ? "Guardando…" : "Guardar lista de CN"}</button>
           </div>
         </div>
-        <div style={{ fontSize: 13, color: C.sub, marginBottom: 12 }}>Al elegir un estupefaciente en Pedidos se pone su CN; en Caducados, al escribir el CN se pone el nombre. Un medicamento puede tener varios CN (distintos proveedores). Hay <b>{cnRows.length}</b> CN. Recuerda pulsar <b>Guardar lista de CN</b> tras los cambios.</div>
+        <div style={{ fontSize: 13, color: C.sub, marginBottom: 12 }}>Al elegir un estupefaciente en Pedidos se pone su CN; en Caducados, al escribir el CN se pone el nombre. Un medicamento puede tener varios CN. Hay <b>{cnRows.length}</b> CN en total. Las filas nuevas aparecen en los dos grupos hasta que eliges su estupefaciente.</div>
         {cnMsg && <div style={{ borderRadius: 8, padding: "8px 10px", fontSize: 13, marginBottom: 10, fontWeight: 600, background: cnMsg.ok ? C.greenBg : C.redBg, color: cnMsg.ok ? C.green : C.red }}>{cnMsg.txt}</div>}
-        <div style={{ overflowX: "auto", maxHeight: 440, overflowY: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 660 }}>
-            <thead><tr>
-              <th style={th}>CN</th><th style={th}>Estupefaciente (Código V)</th><th style={th}>Proveedor habitual</th><th style={th}>Marca (opcional)</th><th style={th}></th>
-            </tr></thead>
-            <tbody>
-              {cnRows.length === 0 && <tr><td colSpan={5} style={{ ...td, textAlign: "center", color: C.sub }}>No hay CN. Pulsa «Añadir CN».</td></tr>}
-              {cnRows.map((e, i) => (
-                <tr key={i}>
-                  <td style={td}><input value={e.cn || ""} onChange={(ev) => setCnRow(i, "cn", ev.target.value.replace(/[^\d]/g, ""))} style={{ ...inputStyle, width: 100 }} placeholder="000000" /></td>
-                  <td style={td}>
-                    <select value={e.codigoV || ""} onChange={(ev) => setCnRow(i, "codigoV", ev.target.value)} style={{ ...inputStyle, minWidth: 250 }}>
-                      <option value="">—</option>
-                      {(meds || []).map((m) => <option key={m.codigoV} value={m.codigoV}>{m.codigoV} · {m.nombre}</option>)}
-                    </select>
-                  </td>
-                  <td style={td}>
-                    <select value={e.proveedor || ""} onChange={(ev) => setCnRow(i, "proveedor", ev.target.value)} style={{ ...inputStyle, minWidth: 150 }}>
-                      <option value="">—</option>
-                      {PROVEEDORES.map((p) => <option key={p} value={p}>{p}</option>)}
-                    </select>
-                  </td>
-                  <td style={td}><input value={e.marca || ""} onChange={(ev) => setCnRow(i, "marca", ev.target.value)} style={{ ...inputStyle, minWidth: 120 }} /></td>
-                  <td style={td}><button style={iconBtn} title="Borrar este CN" onClick={() => delCnRow(i)}><Trash2 size={16} /></button></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </Card>
+        <Card style={{ padding: 0, overflow: "hidden" }}>
+          <div style={{ overflowX: "auto", maxHeight: 460, overflowY: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 660 }}>
+              <thead><tr>
+                <th style={th}>CN</th><th style={th}>Estupefaciente (Código V)</th><th style={th}>Proveedor habitual</th><th style={th}>Marca (opcional)</th><th style={th}></th>
+              </tr></thead>
+              <tbody>
+                {cnConIdx.length === 0 && <tr><td colSpan={5} style={{ ...td, textAlign: "center", color: C.sub }}>Sin CN en este grupo. Pulsa «Añadir CN».</td></tr>}
+                {cnConIdx.map(({ e, i }) => (
+                  <tr key={i}>
+                    <td style={td}><input value={e.cn || ""} onChange={(ev) => setCnRow(i, "cn", ev.target.value.replace(/[^\d]/g, ""))} style={{ ...inputStyle, width: 100 }} placeholder="000000" /></td>
+                    <td style={td}>
+                      <select value={e.codigoV || ""} onChange={(ev) => setCnRow(i, "codigoV", ev.target.value)} style={{ ...inputStyle, minWidth: 250 }}>
+                        <option value="">—</option>
+                        {(meds || []).map((m) => <option key={m.codigoV} value={m.codigoV}>{m.codigoV} · {m.nombre}</option>)}
+                      </select>
+                    </td>
+                    <td style={td}>
+                      <select value={e.proveedor || ""} onChange={(ev) => setCnRow(i, "proveedor", ev.target.value)} style={{ ...inputStyle, minWidth: 150 }}>
+                        <option value="">—</option>
+                        {PROVEEDORES.map((p) => <option key={p} value={p}>{p}</option>)}
+                      </select>
+                    </td>
+                    <td style={td}><input value={e.marca || ""} onChange={(ev) => setCnRow(i, "marca", ev.target.value)} style={{ ...inputStyle, minWidth: 120 }} /></td>
+                    <td style={td}><button style={iconBtn} title="Borrar este CN" onClick={() => delCnRow(i)}><Trash2 size={16} /></button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      </div>}
     </div>
   );
 }
@@ -1902,6 +1969,24 @@ export default function App() {
       }
     } catch (e) { /* sin conexión: la config queda guardada en este equipo */ }
     notify("Configuración guardada" + ((!api.connected() || isOffline()) ? " (en este equipo)" : ""));
+  };
+
+  // Guardar los niveles de pedido (máx/mín por medicamento, #6): local + escribe en el Sheet
+  // solo las filas del catálogo cuyos números hayan cambiado (por su id de fila).
+  const guardarNiveles = async (medsNuevos) => {
+    const prev = meds;
+    setMeds(medsNuevos);
+    let escritos = 0;
+    try {
+      if (api.connected() && !isOffline()) {
+        for (const m of medsNuevos) {
+          const antes = prev.find((x) => x.codigoV === m.codigoV);
+          const cambiado = !antes || String(antes.min ?? "") !== String(m.min ?? "") || String(antes.max ?? "") !== String(m.max ?? "");
+          if (cambiado && m.id) { await api.update("Catalogo", m.id, { id: m.id, codigoV: m.codigoV, nombre: m.nombre, grupo: m.grupo, min: m.min, max: m.max }); escritos++; }
+        }
+      }
+    } catch (e) { /* sin conexión: queda guardado en este equipo */ }
+    notify("Niveles de pedido guardados" + ((!api.connected() || isOffline()) ? " (en este equipo)" : ""));
   };
 
   // Guardar el catálogo CN editado (#8/#15): local + fila "__cncatalog__" de Catalogo (compartido).
@@ -2050,7 +2135,7 @@ export default function App() {
         {view === "pedidos" && <RegistroPedidos pedidos={pedidos} onCreate={crearPedido} onUpdate={actualizarPedido} meds={meds} cnMap={cnMap} cnCatalogo={cnCatalogo} prefill={pedidoPrefill} clearPrefill={() => setPedidoPrefill(null)} />}
         {view === "caducados" && <Caducados caducados={caducados} onCreate={crearCaducado} meds={meds} cnMap={cnMap} />}
         {view === "incidencias" && <Incidencias incidencias={incidencias} onCreate={crearIncidencia} onUpdate={actualizarIncidencia} prefill={incPrefill} clearPrefill={() => setIncPrefill(null)} meds={meds} />}
-        {view === "configuracion" && <ConfiguracionView config={config} onSave={guardarConfig} cnCatalogo={cnCatalogo} meds={meds} onSaveCn={guardarCnCatalogo} />}
+        {view === "configuracion" && <ConfiguracionView config={config} onSave={guardarConfig} cnCatalogo={cnCatalogo} meds={meds} onSaveCn={guardarCnCatalogo} onSaveNiveles={guardarNiveles} />}
       </main>
 
       {/* AJUSTES */}
