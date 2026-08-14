@@ -153,6 +153,20 @@ function normalizeCn(saved) {
   });
 }
 
+/* ---------------------------------------------------------------------------
+   DECLARACIONES DE CADUCADOS (#14) — cada caducado pertenece a una declaración
+   (campo `declaracion`). Los caducados antiguos sin ese campo se consideran de
+   la declaración "inicial". Se puede cerrar la actual y empezar una nueva de 0.
+--------------------------------------------------------------------------- */
+const DECLARACION_INICIAL = { actualId: "inicial", lista: [{ id: "inicial", nombre: "Declaración inicial", creada: 0 }] };
+function normalizeDeclaraciones(d) {
+  if (!d || !Array.isArray(d.lista) || !d.lista.length) return DECLARACION_INICIAL;
+  const lista = d.lista.filter((x) => x && x.id).map((x) => ({ id: String(x.id), nombre: String(x.nombre || "Declaración"), creada: Number(x.creada) || 0 }));
+  if (!lista.length) return DECLARACION_INICIAL;
+  const actualId = lista.some((x) => x.id === d.actualId) ? d.actualId : lista[lista.length - 1].id;
+  return { actualId, lista };
+}
+
 const TIPOS_INCIDENCIA = [
   "Carga manual SADE", "Descarga manual SADE", "Entrada mal registrada",
   "Movimiento por rotura incorrecto", "Movimiento por caducidad incorrecto",
@@ -1383,21 +1397,31 @@ const microBtn = { fontSize: 12, padding: "6px 10px", borderRadius: 8, border: `
 /* ===========================================================================
    5) REGISTRO DE MEDICAMENTOS CADUCADOS
 =========================================================================== */
-function Caducados({ caducados, onCreate, meds, cnMap }) {
+function Caducados({ caducados, onCreate, meds, cnMap, declaraciones, onNuevaDeclaracion }) {
   const [open, setOpen] = useState(false);
   const [f, setF] = useState({});
   const [q, setQ] = useState("");
   const [d1, setD1] = useState(""); const [d2, setD2] = useState("");
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
+  const [verId, setVerId] = useState(declaraciones.actualId);
+  const [openNueva, setOpenNueva] = useState(false);
+  const [nombreNueva, setNombreNueva] = useState("");
+  const [openPdf, setOpenPdf] = useState(false);
+  const [tituloPdf, setTituloPdf] = useState("");
+  const [pdfErr, setPdfErr] = useState("");
+  useEffect(() => { if (!declaraciones.lista.some((d) => d.id === verId)) setVerId(declaraciones.actualId); }, [declaraciones, verId]);
 
-  // Al escribir el CN, autocompleta el nombre del medicamento si está en la base de datos (#15). Editable.
+  const esActual = verId === declaraciones.actualId;
+  const decDe = (c) => c.declaracion || "inicial";
+  const nombreDe = (id) => { const d = declaraciones.lista.find((x) => x.id === id); return d ? d.nombre : "Declaración"; };
+  const countDe = (id) => caducados.filter((c) => decDe(c) === id).length;
+
+  // Al escribir el CN, autocompleta el nombre del medicamento (#15). Editable.
   const setCn = (val) => {
     const hit = cnMap && cnMap[String(val).trim()];
-    if (hit) {
-      const m = (meds || []).find((x) => x.codigoV === hit.codigoV);
-      setF((prev) => ({ ...prev, cn: val, nombre: m ? m.nombre : (hit.marca || prev.nombre) }));
-    } else { setF((prev) => ({ ...prev, cn: val })); }
+    if (hit) { const m = (meds || []).find((x) => x.codigoV === hit.codigoV); setF((prev) => ({ ...prev, cn: val, nombre: m ? m.nombre : (hit.marca || prev.nombre) })); }
+    else { setF((prev) => ({ ...prev, cn: val })); }
   };
   const abrir = () => { setErr(""); setF({}); setOpen(true); };
   const cerrar = () => { setOpen(false); setF({}); setErr(""); };
@@ -1409,14 +1433,56 @@ function Caducados({ caducados, onCreate, meds, cnMap }) {
     catch (e) { setErr("No se pudo guardar el caducado: " + (e && e.message ? e.message : e)); }
     finally { setSaving(false); }
   };
-  const list = caducados
+  const crearNueva = async () => {
+    const nombre = nombreNueva.trim(); if (!nombre) return;
+    const id = await onNuevaDeclaracion(nombre);
+    setVerId(id); setOpenNueva(false); setNombreNueva("");
+  };
+
+  // Caducados de la declaración vista (todos, para el PDF) y filtrados por buscador/fechas (para la tabla)
+  const deLaDeclaracion = caducados.filter((c) => decDe(c) === verId).sort((a, b) => (b.fechaCaducidad || "").localeCompare(a.fechaCaducidad || ""));
+  const list = deLaDeclaracion
     .filter((c) => !q || (c.nombre || "").toLowerCase().includes(q.toLowerCase()) || (c.cn || "").includes(q))
-    .filter((c) => (!d1 || c.fechaCaducidad >= d1) && (!d2 || c.fechaCaducidad <= d2))
-    .sort((a, b) => (b.fechaCaducidad || "").localeCompare(a.fechaCaducidad || ""));
+    .filter((c) => (!d1 || c.fechaCaducidad >= d1) && (!d2 || c.fechaCaducidad <= d2));
+
+  // Informe PDF (#13): abre una vista imprimible en ventana nueva → Guardar como PDF / Imprimir
+  const generarPdf = () => {
+    setPdfErr("");
+    const titulo = tituloPdf.trim() || nombreDe(verId);
+    const esc = (v) => String(v == null ? "" : v).replace(/[&<>]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[ch]));
+    const totalUds = deLaDeclaracion.reduce((s, c) => s + (Number(c.unidades) || 0), 0);
+    const filasHtml = deLaDeclaracion.map((c) => `<tr><td>${esc(c.cn)}</td><td>${esc(c.nombre)}</td><td>${esc(c.lote)}</td><td>${esc(fmtDate(c.fechaCaducidad))}</td><td class="r">${esc(c.unidades)}</td></tr>`).join("");
+    const html = `<!doctype html><html lang="es"><head><meta charset="utf-8"><title>${esc(titulo)}</title>` +
+      `<style>body{font-family:Arial,Helvetica,sans-serif;color:#1F2937;margin:32px}h1{font-size:20px;margin:0 0 4px}.sub{color:#6B7280;font-size:12px;margin-bottom:18px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{border:1px solid #D1D5DB;padding:6px 9px;text-align:left}th{background:#F3F4F6}.r{text-align:right}tfoot td{font-weight:bold;background:#F9FAFB}@media print{body{margin:12mm}}</style>` +
+      `</head><body onload="setTimeout(function(){window.print()},250)">` +
+      `<h1>${esc(titulo)}</h1>` +
+      `<div class="sub">Informe de medicamentos caducados · ${deLaDeclaracion.length} líneas · ${totalUds} unidades · Generado el ${esc(fmtStamp(new Date().toISOString()))}</div>` +
+      `<table><thead><tr><th>CN</th><th>Medicamento</th><th>Lote</th><th>Caducidad</th><th class="r">Unidades</th></tr></thead>` +
+      `<tbody>${filasHtml || '<tr><td colspan="5" style="text-align:center;color:#6B7280">Sin registros</td></tr>'}</tbody>` +
+      `<tfoot><tr><td colspan="4">TOTAL</td><td class="r">${totalUds} uds</td></tr></tfoot></table></body></html>`;
+    const w = window.open("", "_blank");
+    if (!w) { setPdfErr("Tu navegador ha bloqueado la ventana. Permite las ventanas emergentes para este sitio y vuelve a intentarlo."); return; }
+    w.document.write(html); w.document.close(); w.focus();
+    setOpenPdf(false); setTituloPdf("");
+  };
 
   return (
     <div>
-      <SectionTitle title="Medicamentos caducados" desc="Fuente de datos de la futura Declaración Semestral de Caducados." right={<button style={btnPrimary} onClick={abrir}><Plus size={16} /> Registrar caducado</button>} />
+      <SectionTitle title="Medicamentos caducados" desc="Listado por declaración. Fuente de la Declaración Semestral de Caducados."
+        right={esActual && <button style={btnPrimary} onClick={abrir}><Plus size={16} /> Registrar caducado</button>} />
+
+      <Card style={{ marginBottom: 14, display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+        <Field label="Declaración">
+          <select style={{ ...inputStyle, minWidth: 240 }} value={verId} onChange={(e) => setVerId(e.target.value)}>
+            {[...declaraciones.lista].reverse().map((d) => <option key={d.id} value={d.id}>{d.nombre}{d.id === declaraciones.actualId ? " (actual)" : ""} · {countDe(d.id)} reg.</option>)}
+          </select>
+        </Field>
+        <button style={btnGhost} onClick={() => { setNombreNueva(""); setOpenNueva(true); }}><Plus size={15} /> Empezar nueva declaración</button>
+        <button style={btnGhost} onClick={() => { setPdfErr(""); setTituloPdf(nombreDe(verId)); setOpenPdf(true); }}><FileSpreadsheet size={15} /> Informe PDF</button>
+      </Card>
+
+      {!esActual && <div style={{ background: "#F3F4F6", border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 14px", marginBottom: 14, fontSize: 13, color: C.sub }}>Estás viendo una declaración <b>cerrada</b> (solo lectura). Para registrar caducados, cambia a la declaración actual.</div>}
+
       <Card style={{ marginBottom: 14, display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
         <div style={{ flex: 1, minWidth: 220 }}><label style={labelStyle}><Search size={13} style={{ verticalAlign: "middle" }} /> Buscar por nombre o CN</label><input style={inputStyle} value={q} onChange={(e) => setQ(e.target.value)} /></div>
         <Field label="Desde"><input type="date" style={{ ...inputStyle, width: 170 }} value={d1} onChange={(e) => setD1(e.target.value)} /></Field>
@@ -1426,13 +1492,15 @@ function Caducados({ caducados, onCreate, meds, cnMap }) {
         <table style={{ width: "100%", borderCollapse: "collapse" }}>
           <thead><tr><th style={th}>CN</th><th style={th}>Nombre</th><th style={th}>Lote</th><th style={th}>Fecha caducidad</th><th style={th}>Uds. caducadas</th></tr></thead>
           <tbody>
-            {list.length === 0 && <tr><td colSpan={5} style={{ ...td, textAlign: "center", color: C.sub, padding: 26 }}>Sin registros.</td></tr>}
+            {list.length === 0 && <tr><td colSpan={5} style={{ ...td, textAlign: "center", color: C.sub, padding: 26 }}>Sin registros en esta declaración.</td></tr>}
             {list.map((c) => (
               <tr key={c.id}><td style={td}>{c.cn}</td><td style={td}>{c.nombre}</td><td style={td}>{c.lote}</td><td style={td}>{fmtDate(c.fechaCaducidad)}</td><td style={td}>{c.unidades}</td></tr>
             ))}
           </tbody>
         </table>
       </Card>
+
+      {/* Registrar caducado */}
       <Drawer open={open} title="Registrar medicamento caducado" onClose={cerrar}
         footer={<><button style={btnGhost} onClick={cerrar}>Cancelar</button><button style={{ ...btnPrimary, opacity: valid && !saving ? 1 : 0.5 }} disabled={!valid || saving} onClick={guardar}><Save size={15} /> {saving ? "Guardando…" : "Guardar"}</button></>}>
         {err && <div style={errBox}>{err}</div>}
@@ -1444,6 +1512,21 @@ function Caducados({ caducados, onCreate, meds, cnMap }) {
         <Field label="Lote"><input style={inputStyle} value={f.lote || ""} onChange={(e) => setF({ ...f, lote: e.target.value })} /></Field>
         <Field label="Fecha de caducidad"><input type="date" style={reqStyle(!f.fechaCaducidad)} value={f.fechaCaducidad || ""} onChange={(e) => setF({ ...f, fechaCaducidad: e.target.value })} /></Field>
         <Field label="Unidades caducadas"><input type="number" style={reqStyle(!(Number(f.unidades) > 0))} value={f.unidades || ""} onChange={(e) => setF({ ...f, unidades: e.target.value })} /></Field>
+      </Drawer>
+
+      {/* Empezar nueva declaración */}
+      <Drawer open={openNueva} title="Empezar nueva declaración" onClose={() => setOpenNueva(false)}
+        footer={<><button style={btnGhost} onClick={() => setOpenNueva(false)}>Cancelar</button><button style={{ ...btnPrimary, opacity: nombreNueva.trim() ? 1 : 0.5 }} disabled={!nombreNueva.trim()} onClick={crearNueva}><Plus size={15} /> Crear</button></>}>
+        <p style={{ fontSize: 13, color: C.sub, marginTop: 0 }}>La declaración actual (<b>{nombreDe(declaraciones.actualId)}</b>) se guardará y quedará solo para consultar. La nueva empieza vacía.</p>
+        <Field label="Nombre de la nueva declaración"><input style={reqStyle(!nombreNueva.trim())} value={nombreNueva} onChange={(e) => setNombreNueva(e.target.value)} placeholder="Ej. Semestral 2026 - 1º" /></Field>
+      </Drawer>
+
+      {/* Informe PDF */}
+      <Drawer open={openPdf} title="Generar informe PDF" onClose={() => setOpenPdf(false)}
+        footer={<><button style={btnGhost} onClick={() => setOpenPdf(false)}>Cancelar</button><button style={btnPrimary} onClick={generarPdf}><FileSpreadsheet size={15} /> Generar</button></>}>
+        {pdfErr && <div style={errBox}>{pdfErr}</div>}
+        <p style={{ fontSize: 13, color: C.sub, marginTop: 0 }}>Se abrirá una vista imprimible con los <b>{deLaDeclaracion.length}</b> registros de esta declaración. Desde ahí elige <b>Guardar como PDF</b> o imprime.</p>
+        <Field label="Título del informe"><input style={inputStyle} value={tituloPdf} onChange={(e) => setTituloPdf(e.target.value)} placeholder="Título del informe" /></Field>
       </Drawer>
     </div>
   );
@@ -1932,6 +2015,7 @@ export default function App() {
   const [alertas, setAlertas] = useState(() => lsGet(LS.data("Alertas"), []));
   const [config, setConfig] = useState(() => mergeConfig(lsGet(LS.data("Config"), null))); // niveles de descuadre/alerta (#5/#6/#22)
   const [cnCatalogo, setCnCatalogo] = useState(() => normalizeCn(lsGet(LS.data("CnCatalogo"), null))); // CN → medicamento (#8/#15)
+  const [declaraciones, setDeclaraciones] = useState(() => normalizeDeclaraciones(lsGet(LS.data("Declaraciones"), null))); // declaraciones de caducados (#14)
   const [resumenAlertas, setResumenAlertas] = useState(null);
   const [avisosRepo, setAvisosRepo] = useState([]);
   const [incPrefill, setIncPrefill] = useState(null);
@@ -1951,6 +2035,7 @@ export default function App() {
   useEffect(() => { lsSet(LS.data("Alertas"), alertas); }, [alertas]);
   useEffect(() => { lsSet(LS.data("Config"), config); }, [config]);
   useEffect(() => { lsSet(LS.data("CnCatalogo"), cnCatalogo); }, [cnCatalogo]);
+  useEffect(() => { lsSet(LS.data("Declaraciones"), declaraciones); }, [declaraciones]);
 
   // Vuelca la cola de escrituras pendientes al backend (idempotente por id)
   const flush = async () => { const restantes = await outboxFlush(api); setPendientes(restantes); return restantes; };
@@ -1978,7 +2063,9 @@ export default function App() {
           // guardada manda del todo). Se escribe al Sheet cuando se guarda en el editor.
           const cnRow = cat.rows.find((r) => String(r.id) === "__cncatalog__");
           if (cnRow && cnRow.json) { try { setCnCatalogo(normalizeCn(JSON.parse(cnRow.json))); } catch (ek) { /* json corrupto: se mantiene el local */ } }
-          const especiales = new Set(["__config__", "__cncatalog__"]);
+          const decRow = cat.rows.find((r) => String(r.id) === "__declaraciones__");
+          if (decRow && decRow.json) { try { setDeclaraciones(normalizeDeclaraciones(JSON.parse(decRow.json))); } catch (ed) { /* json corrupto: se mantiene el local */ } }
+          const especiales = new Set(["__config__", "__cncatalog__", "__declaraciones__"]);
           const medRows = cat.rows.filter((r) => !especiales.has(String(r.id)));
           if (medRows.length) setMeds(medRows.map(normalizeMed)); // hoja vacía → se mantiene la semilla
         }
@@ -2116,8 +2203,27 @@ export default function App() {
   };
   const actualizarPedido = async (p) => { setPedidos((prev) => prev.map((x) => x.id === p.id ? p : x)); await enqueue({ action: "update", sheet: "Pedidos", id: p.id, row: p }); if (p.avisoLlegada && estadoPedido(p) === "Pendiente") notify("Aviso de llegada registrado — notificado al supervisor"); else notify("Pedido actualizado" + pendSuffix()); };
 
-  // Caducados
-  const crearCaducado = async (c) => { setCaducados((prev) => [c, ...prev]); await enqueue({ action: "append", sheet: "Caducados", row: c }); notify("Caducado registrado" + pendSuffix()); };
+  // Declaraciones de caducados (#14): guardar (local + fila "__declaraciones__" de Catalogo, compartido)
+  const guardarDeclaraciones = async (nuevo) => {
+    setDeclaraciones(nuevo);
+    try {
+      if (api.connected() && !isOffline()) {
+        const row = { id: "__declaraciones__", codigoV: "(dec)", nombre: "Declaraciones de caducados — no editar a mano", grupo: "", json: JSON.stringify(nuevo) };
+        await api.append("Catalogo", row);
+        await api.update("Catalogo", "__declaraciones__", row);
+      }
+    } catch (e) { /* sin conexión: queda en este equipo */ }
+  };
+  // Cerrar la declaración actual y empezar una nueva vacía; devuelve el id de la nueva
+  const nuevaDeclaracion = async (nombre) => {
+    const id = "dec_" + uid();
+    await guardarDeclaraciones({ actualId: id, lista: [...declaraciones.lista, { id, nombre: String(nombre || "Declaración").trim(), creada: Date.now() }] });
+    notify(`Nueva declaración creada: ${nombre}` + pendSuffix());
+    return id;
+  };
+
+  // Caducados — se etiquetan con la declaración activa
+  const crearCaducado = async (c) => { const row = { ...c, declaracion: declaraciones.actualId }; setCaducados((prev) => [row, ...prev]); await enqueue({ action: "append", sheet: "Caducados", row }); notify("Caducado registrado" + pendSuffix()); };
 
   // Incidencias
   const crearIncidencia = async (i) => { setIncidencias((prev) => [i, ...prev]); await enqueue({ action: "append", sheet: "Incidencias", row: i }); notify("Incidencia registrada" + pendSuffix()); };
@@ -2205,7 +2311,7 @@ export default function App() {
         {view === "detector" && <DetectorAlertas onResumen={registrarResumenAlertas} onGuardarCruce={guardarCruce} sheetsConnected={connected} onNombrePaciente={() => notify("⚠️ Posible nombre de paciente detectado y excluido del procesamiento", "crit")} />}
         {view === "alertas" && <AlertasView alertas={alertas} onEstado={marcarAlerta} onPedir={pedirDesdeAlerta} />}
         {view === "pedidos" && <RegistroPedidos pedidos={pedidos} onCreate={crearPedido} onUpdate={actualizarPedido} meds={meds} cnMap={cnMap} cnCatalogo={cnCatalogo} prefill={pedidoPrefill} clearPrefill={() => setPedidoPrefill(null)} />}
-        {view === "caducados" && <Caducados caducados={caducados} onCreate={crearCaducado} meds={meds} cnMap={cnMap} />}
+        {view === "caducados" && <Caducados caducados={caducados} onCreate={crearCaducado} meds={meds} cnMap={cnMap} declaraciones={declaraciones} onNuevaDeclaracion={nuevaDeclaracion} />}
         {view === "incidencias" && <Incidencias incidencias={incidencias} onCreate={crearIncidencia} onUpdate={actualizarIncidencia} prefill={incPrefill} clearPrefill={() => setIncPrefill(null)} meds={meds} />}
         {view === "configuracion" && <ConfiguracionView config={config} onSave={guardarConfig} cnCatalogo={cnCatalogo} meds={meds} onSaveCn={guardarCnCatalogo} onSaveNiveles={guardarNiveles} />}
       </main>
