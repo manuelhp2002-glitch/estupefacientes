@@ -1632,67 +1632,79 @@ function Incidencias({ incidencias, onCreate, onUpdate, prefill, clearPrefill, m
 /* ===========================================================================
    INICIO
 =========================================================================== */
-function Inicio({ inventarios, pedidos, resumenAlertas, avisosRepo, goTo }) {
+function Inicio({ inventarios, incidencias, alertas, resumenAlertas, medByV, config, goTo }) {
   const fechas = [...new Set(inventarios.map((r) => r.fecha))].sort().reverse();
   const ultima = fechas[0];
   const dias = ultima ? Math.floor((Date.now() - new Date(ultima).getTime()) / 86400000) : null;
   const ultInv = inventarios.filter((r) => r.fecha === ultima);
-  const descuadres = ultInv.filter((r) => hayDescuadre(r));
-  const descOral = descuadres.filter((r) => r.grupo === "ORAL").length;
-  const descIV = descuadres.filter((r) => r.grupo === "IV").length;
-  const sinDesc = ultInv.length - descuadres.length;
-  const pendPedidos = pedidos.filter((p) => estadoPedido(p) === "Pendiente").length;
-  const avisadosLlegada = pedidos.filter((p) => estadoPedido(p) === "Pendiente" && p.avisoLlegada);
+
+  // Estadísticas (1, 2, 3, 5)
+  const nivelFila = (r) => { const cat = medCat(r.codigoV, r.grupo); return nivelPeor(nivelDescuadre(r.descRealD07, cat, config), nivelDescuadre(r.descD07Maestro, cat, config)); };
+  const descuadresRojos = ultInv.filter((r) => nivelFila(r) === "crit").length;
+  const incidenciasSinResolver = (incidencias || []).filter((i) => (i.estado || "Pendiente") !== "Resuelta").length;
+  const alertasPend = (alertas || []).filter((a) => a.estado === "pendiente").length;
+
+  // Estupefacientes que hay que pedir (desde el último inventario guardado) — #21
+  const conNivel = ultInv.map((r) => ({ r, sl: stockLevel(Number(r.real || 0), medByV[r.codigoV]) })).filter((x) => x.sl);
+  const bajoMin = conNivel.filter((x) => x.sl.level === "crit").map((x) => x.r);
+  const bajoMax = conNivel.filter((x) => x.sl.level === "warn").map((x) => x.r);
+  const filaPedir = (r, level) => (
+    <div key={r.codigoV} style={{ border: `1px solid ${level === "crit" ? C.red : C.yellow}`, background: level === "crit" ? C.redBg : C.yellowBg, borderRadius: 10, padding: "8px 12px", marginBottom: 6, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+      <div><span style={{ fontWeight: 700, color: C.text, fontSize: 14 }}>{r.nombre}</span> <span style={{ fontFamily: "monospace", fontSize: 11, color: C.sub }}>({r.codigoV})</span></div>
+      <span style={{ fontSize: 12, color: C.sub, whiteSpace: "nowrap" }}>stock {r.real}</span>
+    </div>
+  );
 
   return (
     <div>
       <SectionTitle title="Inicio" desc="Estado general de la gestión de estupefacientes del Servicio de Farmacia." />
+
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 18 }}>
+        <StatCard icon={<AlertTriangle size={18} />} label="Incidencias sin resolver" value={incidenciasSinResolver} tone={incidenciasSinResolver ? "warn" : "ok"} />
+        <StatCard icon={<Bell size={18} />} label="Alertas pendientes" value={alertasPend} tone={alertasPend ? "warn" : "ok"} />
+        <StatCard icon={<ShieldAlert size={18} />} label="Descuadres graves (rojos)" value={descuadresRojos} sub="último inventario" tone={descuadresRojos ? "crit" : "ok"} />
         <StatCard icon={<ClipboardList size={18} />} label="Desde último inventario" value={dias == null ? "—" : `${dias} días`} sub={ultima ? fmtDate(ultima) : "Sin inventarios"} tone="info" />
-        <StatCard icon={<AlertTriangle size={18} />} label="Descuadres activos" value={descuadres.length} sub={`${descOral} orales · ${descIV} IV`} tone={descuadres.length ? "warn" : "ok"} />
-        <StatCard icon={<CheckCircle2 size={18} />} label="Sin descuadre" value={ultInv.length ? `${sinDesc}/${ultInv.length}` : "—"} tone="ok" />
-        <StatCard icon={<PackageSearch size={18} />} label="Pedidos pendientes" value={pendPedidos} tone={pendPedidos ? "warn" : "ok"} />
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 16, alignItems: "start" }}>
-        <Card>
-          <div style={{ fontWeight: 700, color: C.text, display: "flex", gap: 8, alignItems: "center" }}><ShieldAlert size={17} /> Detector de alertas
-            {resumenAlertas && resumenAlertas.fecha && <span style={{ marginLeft: "auto" }}><Badge level={resumenAlertas.criticas ? "crit" : "ok"}>{resumenAlertas.criticas} críticas</Badge></span>}
-          </div>
-          {(!resumenAlertas || !resumenAlertas.fecha) ? (
-            <Empty small icon={<ShieldAlert size={22} />} text="Aún no has ejecutado el Detector de alertas." />
-          ) : (
-            <div style={{ marginTop: 10 }}>
-              <div style={{ fontSize: 13, color: C.text }}>Último análisis: <b>{resumenAlertas.criticas}</b> críticas · <b>{resumenAlertas.vigilar}</b> de vigilar</div>
-              <div style={{ fontSize: 12, color: C.sub, marginTop: 2 }}>{fmtDateTime(new Date(resumenAlertas.fecha))}</div>
-              <button style={{ ...microBtn, marginTop: 10, background: C.accent, color: "#fff", border: "none" }} onClick={() => goTo("detector")}>Ver detalle en el Detector <ArrowRight size={13} /></button>
-            </div>
-          )}
-        </Card>
-
-        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-          <Card>
-            <div style={{ fontWeight: 700, color: C.text, display: "flex", gap: 8, alignItems: "center" }}><Truck size={17} /> Pedidos llegados pendientes de recepción</div>
-            {avisadosLlegada.length === 0 ? <Empty small icon={<Truck size={22} />} text="Sin avisos de llegada pendientes." />
-              : avisadosLlegada.map((p) => (
-                <div key={p.id} style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 10, marginTop: 8, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-                  <div><div style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{p.estupefaciente}</div><div style={{ fontSize: 12, color: C.sub }}>Vale {p.vale} · avisado {p.horaAviso ? fmtDateTime(new Date(p.horaAviso)) : ""}</div></div>
-                  <button style={{ ...microBtn, background: C.accent, color: "#fff", border: "none" }} onClick={() => goTo("pedidos")}>Recepcionar</button>
-                </div>
-              ))}
-          </Card>
-          <Card>
-            <div style={{ fontWeight: 700, color: C.text, display: "flex", gap: 8, alignItems: "center" }}><PackageSearch size={17} /> Avisos de reposición de stock</div>
-            {(!avisosRepo || avisosRepo.length === 0) ? <Empty small icon={<PackageSearch size={22} />} text="Sin avisos de reposición del último inventario." />
-              : avisosRepo.map((a, i) => (
-                <div key={i} style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 10, marginTop: 8, background: a.level === "crit" ? C.redBg : C.yellowBg }}>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{a.nombre} <span style={{ fontFamily: "monospace", fontSize: 11, color: C.sub }}>({a.codigoV})</span></div>
-                  <div style={{ fontSize: 12, color: C.sub }}>{a.accion} · stock real {a.real}</div>
-                </div>
-              ))}
-          </Card>
+      {/* HERO: estupefacientes que hay que pedir (#21) */}
+      <Card style={{ marginBottom: 16, borderColor: bajoMin.length ? C.red : bajoMax.length ? C.yellow : C.border }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginBottom: 6 }}>
+          <div style={{ fontSize: 20, fontWeight: 800, color: C.text, display: "flex", gap: 10, alignItems: "center" }}><PackageSearch size={22} /> Estupefacientes que hay que pedir</div>
+          <button style={btnPrimary} onClick={() => goTo("pedidos")}>Ir a pedidos <ArrowRight size={15} /></button>
         </div>
-      </div>
+        {ultInv.length === 0 ? (
+          <Empty icon={<PackageSearch size={26} />} text="Registra un inventario para ver qué estupefacientes hay que pedir." />
+        ) : (bajoMin.length === 0 && bajoMax.length === 0) ? (
+          <div style={{ display: "flex", gap: 8, alignItems: "center", color: C.green, fontWeight: 700, fontSize: 15, padding: "12px 0" }}><CheckCircle2 size={20} /> Todo el stock está en niveles óptimos. No hay que pedir nada.</div>
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 18, marginTop: 12 }}>
+            <div>
+              <div style={{ fontSize: 15, fontWeight: 800, color: C.red, marginBottom: 10, display: "flex", gap: 8, alignItems: "baseline" }}><span style={{ fontSize: 26 }}>{bajoMin.length}</span> bajo mínimo · urgente a COFARTE</div>
+              {bajoMin.length ? bajoMin.map((r) => filaPedir(r, "crit")) : <div style={{ fontSize: 13, color: C.sub }}>Ninguno.</div>}
+            </div>
+            <div>
+              <div style={{ fontSize: 15, fontWeight: 800, color: C.yellow, marginBottom: 10, display: "flex", gap: 8, alignItems: "baseline" }}><span style={{ fontSize: 26 }}>{bajoMax.length}</span> por debajo del máximo · pedir a laboratorio</div>
+              {bajoMax.length ? bajoMax.map((r) => filaPedir(r, "warn")) : <div style={{ fontSize: 13, color: C.sub }}>Ninguno.</div>}
+            </div>
+          </div>
+        )}
+      </Card>
+
+      {/* Detector de alertas (resumen del último análisis) */}
+      <Card>
+        <div style={{ fontWeight: 700, color: C.text, display: "flex", gap: 8, alignItems: "center" }}><ShieldAlert size={17} /> Detector de alertas
+          {resumenAlertas && resumenAlertas.fecha && <span style={{ marginLeft: "auto" }}><Badge level={resumenAlertas.criticas ? "crit" : "ok"}>{resumenAlertas.criticas} críticas</Badge></span>}
+        </div>
+        {(!resumenAlertas || !resumenAlertas.fecha) ? (
+          <Empty small icon={<ShieldAlert size={22} />} text="Aún no has ejecutado el Detector de alertas." />
+        ) : (
+          <div style={{ marginTop: 10 }}>
+            <div style={{ fontSize: 13, color: C.text }}>Último análisis: <b>{resumenAlertas.criticas}</b> críticas · <b>{resumenAlertas.vigilar}</b> de vigilar</div>
+            <div style={{ fontSize: 12, color: C.sub, marginTop: 2 }}>{fmtDateTime(new Date(resumenAlertas.fecha))}</div>
+            <button style={{ ...microBtn, marginTop: 10, background: C.accent, color: "#fff", border: "none" }} onClick={() => goTo("detector")}>Ver detalle en el Detector <ArrowRight size={13} /></button>
+          </div>
+        )}
+      </Card>
     </div>
   );
 }
@@ -2305,7 +2317,7 @@ export default function App() {
             <CloudOff size={16} /> Modo local: los datos se guardan en este equipo y se sincronizarán con Google Sheets al configurar la URL del Web App (botón «Configurar Sheets»).
           </div>
         )}
-        {view === "inicio" && <Inicio inventarios={inventarios} pedidos={pedidos} resumenAlertas={resumenAlertas} avisosRepo={avisosRepo} goTo={setView} />}
+        {view === "inicio" && <Inicio inventarios={inventarios} incidencias={incidencias} alertas={alertas} resumenAlertas={resumenAlertas} medByV={medByV} config={config} goTo={setView} />}
         {view === "inventario" && <InventarioSemanal onSaved={guardarInventario} avisos={avisosRepo} meds={meds} medByV={medByV} config={config} />}
         {view === "anteriores" && <InventariosAnteriores inventarios={inventarios} config={config} medByV={medByV} onEdit={guardarEdicionInventario} onCrearIncidencia={crearIncidenciaDesdeDescuadre} />}
         {view === "detector" && <DetectorAlertas onResumen={registrarResumenAlertas} onGuardarCruce={guardarCruce} sheetsConnected={connected} onNombrePaciente={() => notify("⚠️ Posible nombre de paciente detectado y excluido del procesamiento", "crit")} />}
