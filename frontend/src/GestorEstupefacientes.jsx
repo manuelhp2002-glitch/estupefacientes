@@ -519,6 +519,27 @@ function StatCard({ icon, label, value, sub, tone }) {
     </Card>
   );
 }
+// Tarjeta de estadística con el valor separado en Orales / Intravenosos
+function SplitStat({ icon, label, oral, iv, tone }) {
+  const tones = { crit: C.red, warn: C.yellow, ok: C.green, info: C.accent };
+  const grp = (Icon, txt, v) => (
+    <div>
+      <div style={{ fontSize: 11, color: C.sub, fontWeight: 600, display: "flex", gap: 4, alignItems: "center" }}><Icon size={12} /> {txt}</div>
+      <div style={{ fontSize: 24, fontWeight: 700, color: C.text, marginTop: 2 }}>{v}</div>
+    </div>
+  );
+  return (
+    <Card style={{ flex: 1, minWidth: 210 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, color: tones[tone] || C.accent }}>
+        {icon}<span style={{ fontSize: 13, fontWeight: 600, color: C.sub }}>{label}</span>
+      </div>
+      <div style={{ display: "flex", gap: 20, marginTop: 10 }}>
+        {grp(Pill, "Orales", oral)}
+        <div style={{ borderLeft: `1px solid ${C.border}`, paddingLeft: 20 }}>{grp(Syringe, "Intrav.", iv)}</div>
+      </div>
+    </Card>
+  );
+}
 function SectionTitle({ title, desc, right }) {
   return (
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 18, flexWrap: "wrap", gap: 12 }}>
@@ -1635,14 +1656,17 @@ function Incidencias({ incidencias, onCreate, onUpdate, prefill, clearPrefill, m
 function Inicio({ inventarios, incidencias, alertas, resumenAlertas, medByV, config, goTo }) {
   const fechas = [...new Set(inventarios.map((r) => r.fecha))].sort().reverse();
   const ultima = fechas[0];
-  const dias = ultima ? Math.floor((Date.now() - new Date(ultima).getTime()) / 86400000) : null;
   const ultInv = inventarios.filter((r) => r.fecha === ultima);
 
-  // Estadísticas (1, 2, 3, 5)
+  // Estadísticas (1, 2, 3, 5), cada una separada en Orales / Intravenosos
+  const grupoDeV = (cv) => (medByV[cv] ? medByV[cv].grupo : null);
+  const grupoInc = (i) => grupoDeV((String(i.medicamento || "").match(/([VYT]\d{5})/) || [])[1]);
   const nivelFila = (r) => { const cat = medCat(r.codigoV, r.grupo); return nivelPeor(nivelDescuadre(r.descRealD07, cat, config), nivelDescuadre(r.descD07Maestro, cat, config)); };
-  const descuadresRojos = ultInv.filter((r) => nivelFila(r) === "crit").length;
-  const incidenciasSinResolver = (incidencias || []).filter((i) => (i.estado || "Pendiente") !== "Resuelta").length;
-  const alertasPend = (alertas || []).filter((a) => a.estado === "pendiente").length;
+  const cont = (arr, g) => arr.filter((x) => x === g).length;
+  const incGr = (incidencias || []).filter((i) => (i.estado || "Pendiente") !== "Resuelta").map(grupoInc);
+  const alGr = (alertas || []).filter((a) => a.estado === "pendiente").map((a) => grupoDeV(a.codigoV));
+  const rojoGr = ultInv.filter((r) => nivelFila(r) === "crit").map((r) => r.grupo);
+  const diasDe = (g) => { const u = inventarios.filter((r) => r.grupo === g).map((r) => r.fecha).filter(Boolean).sort().reverse()[0]; return u ? `${Math.floor((Date.now() - new Date(u).getTime()) / 86400000)} d` : "—"; };
 
   // Estupefacientes que hay que pedir (desde el último inventario guardado) — #21
   const conNivel = ultInv.map((r) => ({ r, sl: stockLevel(Number(r.real || 0), medByV[r.codigoV]) })).filter((x) => x.sl);
@@ -1674,10 +1698,10 @@ function Inicio({ inventarios, incidencias, alertas, resumenAlertas, medByV, con
       <SectionTitle title="Inicio" desc="Estado general de la gestión de estupefacientes del Servicio de Farmacia." />
 
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 18 }}>
-        <StatCard icon={<AlertTriangle size={18} />} label="Incidencias sin resolver" value={incidenciasSinResolver} tone={incidenciasSinResolver ? "warn" : "ok"} />
-        <StatCard icon={<Bell size={18} />} label="Alertas pendientes" value={alertasPend} tone={alertasPend ? "warn" : "ok"} />
-        <StatCard icon={<ShieldAlert size={18} />} label="Descuadres graves (rojos)" value={descuadresRojos} sub="último inventario" tone={descuadresRojos ? "crit" : "ok"} />
-        <StatCard icon={<ClipboardList size={18} />} label="Desde último inventario" value={dias == null ? "—" : `${dias} días`} sub={ultima ? fmtDate(ultima) : "Sin inventarios"} tone="info" />
+        <SplitStat icon={<AlertTriangle size={18} />} label="Incidencias sin resolver" oral={cont(incGr, "ORAL")} iv={cont(incGr, "IV")} tone={incGr.length ? "warn" : "ok"} />
+        <SplitStat icon={<Bell size={18} />} label="Alertas pendientes" oral={cont(alGr, "ORAL")} iv={cont(alGr, "IV")} tone={alGr.length ? "warn" : "ok"} />
+        <SplitStat icon={<ShieldAlert size={18} />} label="Descuadres graves (rojos)" oral={cont(rojoGr, "ORAL")} iv={cont(rojoGr, "IV")} tone={rojoGr.length ? "crit" : "ok"} />
+        <SplitStat icon={<ClipboardList size={18} />} label="Desde último inventario" oral={diasDe("ORAL")} iv={diasDe("IV")} tone="info" />
       </div>
 
       {/* HERO: estupefacientes que hay que pedir (#21) */}
