@@ -1654,6 +1654,20 @@ function Inicio({ inventarios, incidencias, alertas, resumenAlertas, medByV, con
       <span style={{ fontSize: 12, color: C.sub, whiteSpace: "nowrap" }}>stock {r.real}</span>
     </div>
   );
+  // Lista de "hay que pedir" separada por Orales / Intravenosos
+  const subCab = { fontSize: 12, fontWeight: 700, color: C.sub, textTransform: "uppercase", letterSpacing: 0.4, display: "flex", gap: 6, alignItems: "center" };
+  const seccionPedir = (filas, level) => {
+    const orales = filas.filter((r) => r.grupo === "ORAL");
+    const iv = filas.filter((r) => r.grupo === "IV");
+    return (
+      <>
+        {orales.length > 0 && <div style={{ ...subCab, margin: "2px 0 6px" }}><Pill size={13} /> Orales</div>}
+        {orales.map((r) => filaPedir(r, level))}
+        {iv.length > 0 && <div style={{ ...subCab, margin: `${orales.length ? 12 : 2}px 0 6px` }}><Syringe size={13} /> Intravenosos</div>}
+        {iv.map((r) => filaPedir(r, level))}
+      </>
+    );
+  };
 
   return (
     <div>
@@ -1680,11 +1694,11 @@ function Inicio({ inventarios, incidencias, alertas, resumenAlertas, medByV, con
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 18, marginTop: 12 }}>
             <div>
               <div style={{ fontSize: 15, fontWeight: 800, color: C.red, marginBottom: 10, display: "flex", gap: 8, alignItems: "baseline" }}><span style={{ fontSize: 26 }}>{bajoMin.length}</span> bajo mínimo · urgente a COFARTE</div>
-              {bajoMin.length ? bajoMin.map((r) => filaPedir(r, "crit")) : <div style={{ fontSize: 13, color: C.sub }}>Ninguno.</div>}
+              {bajoMin.length ? seccionPedir(bajoMin, "crit") : <div style={{ fontSize: 13, color: C.sub }}>Ninguno.</div>}
             </div>
             <div>
               <div style={{ fontSize: 15, fontWeight: 800, color: C.yellow, marginBottom: 10, display: "flex", gap: 8, alignItems: "baseline" }}><span style={{ fontSize: 26 }}>{bajoMax.length}</span> por debajo del máximo · pedir a laboratorio</div>
-              {bajoMax.length ? bajoMax.map((r) => filaPedir(r, "warn")) : <div style={{ fontSize: 13, color: C.sub }}>Ninguno.</div>}
+              {bajoMax.length ? seccionPedir(bajoMax, "warn") : <div style={{ fontSize: 13, color: C.sub }}>Ninguno.</div>}
             </div>
           </div>
         )}
