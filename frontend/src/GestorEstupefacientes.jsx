@@ -695,13 +695,103 @@ const legendDot = { display: "inline-block", width: 12, height: 12, borderRadius
 /* ===========================================================================
    2) INVENTARIOS ANTERIORES
 =========================================================================== */
-function InventariosAnteriores({ inventarios, config, medByV, onEdit, onCrearIncidencia }) {
+// Ficha de SOLO LECTURA de un medicamento, abierta desde Inventarios anteriores (F2).
+// No muestra CN (estamos fuera del Registro de Pedidos). Los proveedores se derivan de los
+// pedidos ya registrados; no se añade ningún campo nuevo al catálogo ni entrada manual.
+function FichaMedicamento({ open, row, med, pedidos, config, onClose }) {
+  const proveedores = useMemo(() => {
+    if (!row) return [];
+    const porProv = {};
+    (pedidos || []).forEach((p) => {
+      if (extraerCodigoV(p.estupefaciente) !== row.codigoV) return; // el campo guarda "Vxxxxx · NOMBRE"
+      const prov = String(p.proveedor || "").trim() || "—";
+      const d = toDate(p.fechaPedido);
+      const t = d ? d.getTime() : -Infinity;
+      if (!porProv[prov] || t > porProv[prov].t) porProv[prov] = { proveedor: prov, t, fecha: p.fechaPedido };
+    });
+    return Object.values(porProv).sort((a, b) => b.t - a.t); // más reciente primero
+  }, [row, pedidos]);
+
+  if (!open || !row) return null;
+
+  const grupoTxt = (med && med.grupo ? med.grupo : row.grupo) === "IV" ? "Intravenoso" : "Oral";
+  const max = (med && med.max != null && med.max !== "") ? Number(med.max) : null;
+  const min = (med && med.min != null && med.min !== "") ? Number(med.min) : null;
+  const sinUmbrales = max == null || min == null || (max === 0 && min === 0);
+
+  const real = Number(row.real || 0), d07 = Number(row.d07 || 0), maestro = Number(row.maestro || 0);
+  const dRD = real - d07, dDM = d07 - maestro;
+  const cat = medCat(row.codigoV, med && med.grupo ? med.grupo : row.grupo);
+  const nRD = nivelDescuadre(dRD, cat, config), nDM = nivelDescuadre(dDM, cat, config);
+  const sl = stockLevel(real, med);
+
+  const seccion = { marginBottom: 18 };
+  const cab = { fontSize: 12, fontWeight: 700, color: C.sub, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 6 };
+  const linea = { fontSize: 14, color: C.text };
+  const aclara = { fontSize: 12, color: C.sub, marginTop: 2 };
+
+  return (
+    <Drawer open={open} title={row.nombre} onClose={onClose}>
+      <div style={seccion}>
+        <div style={cab}>Identificación</div>
+        <div style={linea}><span style={{ fontFamily: "monospace" }}>{row.codigoV}</span> · {grupoTxt}</div>
+      </div>
+      <div style={seccion}>
+        <div style={cab}>Umbrales de pedido</div>
+        {sinUmbrales ? (
+          <div style={linea}>Sin umbrales definidos</div>
+        ) : (<>
+          <div style={{ marginBottom: 10 }}>
+            <div style={linea}><b>Umbral de pedido a laboratorio:</b> {max}</div>
+            <div style={aclara}>Por debajo de este stock, pedir a laboratorio (Seflogic®).</div>
+          </div>
+          <div>
+            <div style={linea}><b>Umbral de pedido urgente a COFARTE:</b> {min}</div>
+            <div style={aclara}>Por debajo de este stock, pedido urgente a cooperativa.</div>
+          </div>
+        </>)}
+      </div>
+      <div style={seccion}>
+        <div style={cab}>Proveedores</div>
+        {proveedores.length === 0 ? (
+          <div style={{ ...linea, color: C.sub }}>Sin pedidos registrados para este medicamento.</div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {proveedores.map((p) => (
+              <div key={p.proveedor} style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 14 }}>
+                <span style={{ color: C.text, fontWeight: 600 }}>{p.proveedor}</span>
+                <span style={{ color: C.sub }}>último pedido: {fmtDate(p.fecha)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      <div style={seccion}>
+        <div style={cab}>Situación en este inventario ({fmtDate(row.fecha)})</div>
+        <div style={{ display: "flex", gap: 18, flexWrap: "wrap", marginBottom: 10 }}>
+          <div><div style={aclara}>ATHOS REAL</div><div style={{ ...linea, fontWeight: 700 }}>{real}</div></div>
+          <div><div style={aclara}>D07</div><div style={{ ...linea, fontWeight: 700 }}>{d07}</div></div>
+          <div><div style={aclara}>MAESTRO</div><div style={{ ...linea, fontWeight: 700 }}>{maestro}</div></div>
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 8 }}>
+          <span style={{ fontSize: 13, color: C.sub }}>Real−D07:</span><Badge level={nRD}>{dRD > 0 ? "+" : ""}{dRD}</Badge>
+          <span style={{ fontSize: 13, color: C.sub, marginLeft: 8 }}>D07−Maestro:</span><Badge level={nDM}>{dDM > 0 ? "+" : ""}{dDM}</Badge>
+        </div>
+        <div><span style={{ fontSize: 13, color: C.sub }}>Nivel de stock: </span>{sl ? <Badge level={sl.level}>{sl.txt}</Badge> : <span style={{ fontSize: 13, color: C.text }}>—</span>}</div>
+      </div>
+    </Drawer>
+  );
+}
+
+function InventariosAnteriores({ inventarios, config, medByV, pedidos, onEdit, onCrearIncidencia }) {
   const fechas = useMemo(() => [...new Set(inventarios.map((r) => r.fecha))].sort().reverse(), [inventarios]);
   const [sel, setSel] = useState(fechas[0] || "");
   const [grupo, setGrupo] = useState("ORAL");
   const [editando, setEditando] = useState(false);
   const [draft, setDraft] = useState({});
   const [saving, setSaving] = useState(false);
+  const [ficha, setFicha] = useState(null); // fila cuyo medicamento se muestra en la ficha (F11)
+  const nombreBtn = { background: "none", border: "none", padding: 0, margin: 0, font: "inherit", color: C.text, cursor: "pointer", textAlign: "left", textDecoration: "none" };
   useEffect(() => { if (!sel && fechas[0]) setSel(fechas[0]); }, [fechas, sel]);
   useEffect(() => { setEditando(false); setDraft({}); }, [sel, grupo]); // salir de edición al cambiar de fecha/grupo
 
@@ -785,7 +875,11 @@ function InventariosAnteriores({ inventarios, config, medByV, onEdit, onCrearInc
                     return (
                       <tr key={r.id} style={{ background: rowBg[lvl] }}>
                         <td style={{ ...td, fontFamily: "monospace", fontSize: 12 }}>{r.codigoV}</td>
-                        <td style={{ ...td, minWidth: 200 }}>{r.nombre}</td>
+                        <td style={{ ...td, minWidth: 200 }}>
+                          <button type="button" onClick={() => setFicha(r)} title="Ver ficha del medicamento" style={nombreBtn}
+                            onMouseEnter={(e) => (e.currentTarget.style.textDecoration = "underline")}
+                            onMouseLeave={(e) => (e.currentTarget.style.textDecoration = "none")}>{r.nombre}</button>
+                        </td>
                         {editando ? (<>
                           <td style={td}><input value={val(r, "real")} onChange={(e) => setCampo(r.id, "real", e.target.value)} style={miniInput} /></td>
                           <td style={td}><input value={val(r, "d07")} onChange={(e) => setCampo(r.id, "d07", e.target.value)} style={miniInput} /></td>
@@ -812,6 +906,7 @@ function InventariosAnteriores({ inventarios, config, medByV, onEdit, onCrearInc
           </Card>
         </div>
       )}
+      <FichaMedicamento open={!!ficha} row={ficha} med={ficha ? medByV[ficha.codigoV] : null} pedidos={pedidos} config={config} onClose={() => setFicha(null)} />
     </div>
   );
 }
@@ -2384,7 +2479,7 @@ export default function App() {
         )}
         {view === "inicio" && <Inicio inventarios={inventarios} incidencias={incidencias} alertas={alertas} resumenAlertas={resumenAlertas} medByV={medByV} config={config} goTo={setView} />}
         {view === "inventario" && <InventarioSemanal onSaved={guardarInventario} avisos={avisosRepo} meds={meds} medByV={medByV} config={config} />}
-        {view === "anteriores" && <InventariosAnteriores inventarios={inventarios} config={config} medByV={medByV} onEdit={guardarEdicionInventario} onCrearIncidencia={crearIncidenciaDesdeDescuadre} />}
+        {view === "anteriores" && <InventariosAnteriores inventarios={inventarios} config={config} medByV={medByV} pedidos={pedidos} onEdit={guardarEdicionInventario} onCrearIncidencia={crearIncidenciaDesdeDescuadre} />}
         {view === "detector" && <DetectorAlertas onResumen={registrarResumenAlertas} onGuardarCruce={guardarCruce} sheetsConnected={connected} onNombrePaciente={() => notify("⚠️ Posible nombre de paciente detectado y excluido del procesamiento", "crit")} />}
         {view === "alertas" && <AlertasView alertas={alertas} onEstado={marcarAlerta} onPedir={pedirDesdeAlerta} />}
         {view === "pedidos" && <RegistroPedidos pedidos={pedidos} onCreate={crearPedido} onUpdate={actualizarPedido} meds={meds} cnMap={cnMap} cnCatalogo={cnCatalogo} prefill={pedidoPrefill} clearPrefill={() => setPedidoPrefill(null)} />}
