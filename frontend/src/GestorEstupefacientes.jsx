@@ -610,6 +610,37 @@ const th = { textAlign: "left", padding: "10px 12px", fontSize: 12, fontWeight: 
 const td = { padding: "10px 12px", fontSize: 13, color: C.text, borderBottom: `1px solid ${C.border}` };
 const rowBg = { none: "#fff", warn: C.yellowBg, orange: C.orangeBg, crit: C.redBg };
 
+// Ordenación de tablas COMPARTIDA (F4 Pedidos y F3 Detector). sortVal(item, key) devuelve el
+// valor comparable de esa columna. Los valores null/undefined van SIEMPRE al final (en cualquier
+// dirección). El texto compara con localeCompare español (Ñ y acentos ordenan bien). Con
+// sort.key === null se respeta el orden del array de entrada (en el Detector: el cronológico del
+// análisis). reset() vuelve a ese orden de entrada.
+function useSortableTable(items, sortVal, initial = { key: null, dir: "asc" }) {
+  const [sort, setSort] = useState(initial);
+  const toggle = (key) => setSort((s) => (s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" }));
+  const reset = () => setSort({ key: null, dir: "asc" });
+  const sorted = useMemo(() => {
+    if (!sort.key) return items;
+    const arr = [...items];
+    arr.sort((a, b) => {
+      const va = sortVal(a, sort.key), vb = sortVal(b, sort.key);
+      if (va == null || vb == null) return va == null && vb == null ? 0 : va == null ? 1 : -1; // null/vacío al final
+      const c = (typeof va === "number" && typeof vb === "number") ? va - vb : String(va).localeCompare(String(vb), "es", { numeric: true });
+      return sort.dir === "asc" ? c : -c;
+    });
+    return arr;
+    // eslint-disable-next-line
+  }, [items, sort]);
+  return { sorted, sort, toggle, reset };
+}
+function SortableTh({ label, k, sort, onSort, extra }) {
+  return (
+    <th style={{ ...th, cursor: "pointer", userSelect: "none", ...(extra || {}) }} onClick={() => onSort(k)} title="Ordenar por esta columna">
+      {label}{sort.key === k ? (sort.dir === "asc" ? " ▲" : " ▼") : ""}
+    </th>
+  );
+}
+
 /* ===========================================================================
    1) INVENTARIO SEMANAL
 =========================================================================== */
@@ -1220,6 +1251,25 @@ function DetectorAlertas({ onResumen, onGuardarCruce, sheetsConnected, onNombreP
   const nWarnTot = resultado ? resultado.filter((r) => r.nivel === "warn").length : 0; // global
   const nSinClasif = resultado ? resultado.filter((r) => r.grupo === "SIN_CLASIFICAR").length : 0;
 
+  // Ordenación de columnas (F13) vía el mismo helper que Pedidos. Se aplica DESPUÉS de los
+  // filtros (pipeline: resultado -> grupo -> solo-alertas -> ORDENACIÓN -> render). El orden por
+  // defecto (sort.key === null) es el cronológico del análisis (campo r.seq). La fecha se ordena
+  // por r.seq —día + hora real si existe, si no la secuencia de origen—, nunca por la cadena.
+  const sortValDet = (r, key) => {
+    switch (key) {
+      case "medicamento": return String(r.medicamento || "").toLowerCase();
+      case "codigoV": return r.codigoV ? String(r.codigoV) : null;               // vacíos al final
+      case "fecha": return r.seq;                                                 // cronológico real
+      case "tipo": return String(r.tipo || "").toLowerCase();
+      case "cantidad": return Number(r.cantidad) || 0;
+      case "cantFinal": return r.cantFinal == null ? null : Number(r.cantFinal);  // nulls al final
+      case "usuario": return String(r.usuario || "").toLowerCase();
+      case "alertas": return (ORDEN_NIVEL[r.nivel] || 0) * 100 + r.flags.length;  // gravedad, luego nº de códigos
+      default: return String(r[key] || "").toLowerCase();
+    }
+  };
+  const { sorted: vistaOrdenada, sort: sortDet, toggle: toggleSortDet, reset: resetSortDet } = useSortableTable(vista, sortValDet);
+
   return (
     <div>
       <SectionTitle title="Detector de alertas" desc="Cruza el Libro de Estupefacientes con el Histórico del SADE y detecta movimientos sospechosos (E01–E12)." />
@@ -1269,6 +1319,7 @@ function DetectorAlertas({ onResumen, onGuardarCruce, sheetsConnected, onNombreP
           )}
           <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
             <GroupFilter3 value={grupoF} onChange={setGrupoF} />
+            {sortDet.key && <button style={btnGhost} onClick={resetSortDet} title="Volver al orden cronológico del análisis"><RefreshCw size={14} /> Restablecer orden cronológico</button>}
             <Badge level="crit">{nCrit} críticas (de {nCritTot} en total)</Badge>
             <Badge level="warn">{nWarn} de vigilar (de {nWarnTot} en total)</Badge>
             <Badge level="none">{vista.length} movimientos (de {resultado.length} en total)</Badge>
@@ -1290,10 +1341,18 @@ function DetectorAlertas({ onResumen, onGuardarCruce, sheetsConnected, onNombreP
             <div style={{ overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 1000 }}>
                 <thead><tr>
-                  <th style={th}>Medicamento</th><th style={th}>Código V</th><th style={th}>Fecha movimiento</th><th style={th}>Tipo de movimiento</th><th style={th}>Médico</th><th style={th}>Cantidad</th><th style={th}>Cantidad final</th><th style={th}>Usuario</th><th style={th}>Alertas</th>
+                  <SortableTh label="Medicamento" k="medicamento" sort={sortDet} onSort={toggleSortDet} />
+                  <SortableTh label="Código V" k="codigoV" sort={sortDet} onSort={toggleSortDet} />
+                  <SortableTh label="Fecha movimiento" k="fecha" sort={sortDet} onSort={toggleSortDet} />
+                  <SortableTh label="Tipo de movimiento" k="tipo" sort={sortDet} onSort={toggleSortDet} />
+                  <th style={th}>Médico</th>
+                  <SortableTh label="Cantidad" k="cantidad" sort={sortDet} onSort={toggleSortDet} />
+                  <SortableTh label="Cantidad final" k="cantFinal" sort={sortDet} onSort={toggleSortDet} />
+                  <SortableTh label="Usuario" k="usuario" sort={sortDet} onSort={toggleSortDet} />
+                  <SortableTh label="Alertas" k="alertas" sort={sortDet} onSort={toggleSortDet} />
                 </tr></thead>
                 <tbody>
-                  {vista.map((r) => (
+                  {vistaOrdenada.map((r) => (
                     <tr key={r.id} style={{ background: rowBg[r.nivel] }}>
                       <td style={{ ...td, minWidth: 210 }}>
                         <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
@@ -1366,7 +1425,6 @@ function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, cnMap, cnCatalogo,
   const [r, setR] = useState({});
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
-  const [sort, setSort] = useState({ key: "vale", dir: "desc" }); // por defecto: vale más alto arriba (#2/#20)
 
   // Abre "Nuevo pedido": siembra la fecha de hoy y el siguiente nº de vale (editable) (#7)
   const abrirNuevo = (base) => {
@@ -1448,8 +1506,9 @@ function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, cnMap, cnCatalogo,
   };
   const avisar = async (p) => { await onUpdate({ ...p, avisoLlegada: true, horaAviso: new Date().toISOString() }); };
 
-  // Ordenación de la tabla (#2/#20): clic en cabecera ordena; repetir invierte
-  const toggleSort = (key) => setSort((s) => (s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" }));
+  // Ordenación de la tabla (#2/#20) vía helper compartido useSortableTable. Por defecto: vale
+  // más alto arriba. sortVal es específico de esta tabla; nunca devuelve null (no cambia con el
+  // tratamiento de null/vacío-al-final del helper).
   const sortVal = (p, key) => {
     if (key === "vale") { const m = String(p.vale || "").match(/(\d+)\s*$/); return m ? parseInt(m[1], 10) : String(p.vale || "").toLowerCase(); }
     if (key === "estado") return estadoPedido(p);
@@ -1458,21 +1517,7 @@ function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, cnMap, cnCatalogo,
     if (key === "udsRecibidas") return (p.udsRecibidas == null || p.udsRecibidas === "") ? -1 : Number(p.udsRecibidas);
     return String(p[key] || "").toLowerCase();
   };
-  const pedidosOrdenados = useMemo(() => {
-    const arr = [...pedidos];
-    arr.sort((a, b) => {
-      const va = sortVal(a, sort.key), vb = sortVal(b, sort.key);
-      const c = (typeof va === "number" && typeof vb === "number") ? va - vb : String(va).localeCompare(String(vb), "es", { numeric: true });
-      return sort.dir === "asc" ? c : -c;
-    });
-    return arr;
-    // eslint-disable-next-line
-  }, [pedidos, sort]);
-  const ThSort = ({ label, k, extra }) => (
-    <th style={{ ...th, cursor: "pointer", userSelect: "none", ...(extra || {}) }} onClick={() => toggleSort(k)} title="Ordenar por esta columna">
-      {label}{sort.key === k ? (sort.dir === "asc" ? " ▲" : " ▼") : ""}
-    </th>
-  );
+  const { sorted: pedidosOrdenados, sort, toggle: toggleSort } = useSortableTable(pedidos, sortVal, { key: "vale", dir: "desc" });
 
   return (
     <div>
@@ -1481,7 +1526,7 @@ function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, cnMap, cnCatalogo,
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 900 }}>
             <thead><tr>
-              <ThSort label="Vale" k="vale" /><ThSort label="CN" k="cn" /><ThSort label="Estupefaciente" k="estupefaciente" /><ThSort label="Proveedor" k="proveedor" /><ThSort label="F. pedido" k="fechaPedido" /><ThSort label="Pedidas" k="udsPedidas" /><ThSort label="Recibidas" k="udsRecibidas" /><ThSort label="Estado" k="estado" /><th style={th}>Acción</th>
+              <SortableTh label="Vale" k="vale" sort={sort} onSort={toggleSort} /><SortableTh label="CN" k="cn" sort={sort} onSort={toggleSort} /><SortableTh label="Estupefaciente" k="estupefaciente" sort={sort} onSort={toggleSort} /><SortableTh label="Proveedor" k="proveedor" sort={sort} onSort={toggleSort} /><SortableTh label="F. pedido" k="fechaPedido" sort={sort} onSort={toggleSort} /><SortableTh label="Pedidas" k="udsPedidas" sort={sort} onSort={toggleSort} /><SortableTh label="Recibidas" k="udsRecibidas" sort={sort} onSort={toggleSort} /><SortableTh label="Estado" k="estado" sort={sort} onSort={toggleSort} /><th style={th}>Acción</th>
             </tr></thead>
             <tbody>
               {pedidos.length === 0 && <tr><td colSpan={9} style={{ ...td, textAlign: "center", color: C.sub, padding: 26 }}>Sin pedidos registrados.</td></tr>}
