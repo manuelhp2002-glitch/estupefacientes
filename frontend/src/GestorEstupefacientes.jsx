@@ -581,6 +581,31 @@ function GroupToggle({ value, onChange }) {
     </div>
   );
 }
+// Grupo de un movimiento resuelto por catálogo: ORAL, IV o SIN_CLASIFICAR (Código V vacío
+// o no presente en el catálogo). Se usa solo para presentar/filtrar el Detector (F3).
+function grupoDeCodigoV(medByV, codigoV) {
+  const cv = String(codigoV || "").trim();
+  const m = cv ? (medByV || {})[cv] : null;
+  if (!m || !m.grupo) return "SIN_CLASIFICAR";
+  return m.grupo === "IV" ? "IV" : "ORAL";
+}
+// Variante de 3 estados del GroupToggle (Todos · Orales · Intravenosos) para el filtro del
+// Detector. No se toca GroupToggle (lo usan F1 y F2); reutiliza su patrón visual (píldora #EEF0F6).
+function GroupFilter3({ value, onChange }) {
+  const opts = [["TODOS", "Todos", null], ["ORAL", "Orales", <Pill size={15} key="p" />], ["IV", "Intravenosos", <Syringe size={15} key="s" />]];
+  return (
+    <div style={{ display: "inline-flex", background: "#EEF0F6", borderRadius: 10, padding: 3 }}>
+      {opts.map(([v, t, ic]) => (
+        <button key={v} onClick={() => onChange(v)} style={{
+          border: "none", cursor: "pointer", padding: "7px 14px", borderRadius: 8, fontWeight: 600, fontSize: 13,
+          display: "inline-flex", gap: 6, alignItems: "center",
+          background: value === v ? "#fff" : "transparent", color: value === v ? C.text : C.sub,
+          boxShadow: value === v ? "0 1px 3px rgba(0,0,0,0.1)" : "none",
+        }}>{ic}{t}</button>
+      ))}
+    </div>
+  );
+}
 const th = { textAlign: "left", padding: "10px 12px", fontSize: 12, fontWeight: 700, color: C.sub, borderBottom: `1px solid ${C.border}`, whiteSpace: "nowrap" };
 const td = { padding: "10px 12px", fontSize: 13, color: C.text, borderBottom: `1px solid ${C.border}` };
 const rowBg = { none: "#fff", warn: C.yellowBg, orange: C.orangeBg, crit: C.redBg };
@@ -1094,7 +1119,7 @@ function analizarMovimientos(rows) {
   });
 }
 
-function DetectorAlertas({ onResumen, onGuardarCruce, sheetsConnected, onNombrePaciente }) {
+function DetectorAlertas({ onResumen, onGuardarCruce, sheetsConnected, onNombrePaciente, medByV }) {
   const [libro, setLibro] = useState(null);
   const [historico, setHistorico] = useState(null);
   const [desde, setDesde] = useState("");
@@ -1106,6 +1131,7 @@ function DetectorAlertas({ onResumen, onGuardarCruce, sheetsConnected, onNombreP
   const [guardado, setGuardado] = useState(false);
   const [error, setError] = useState("");
   const [soloAlertas, setSoloAlertas] = useState(false);
+  const [grupoF, setGrupoF] = useState("TODOS"); // filtro de presentación: TODOS | ORAL | IV (F12)
 
   const guardarEnSheets = async () => {
     if (!resultado || !onGuardarCruce) return;
@@ -1123,6 +1149,7 @@ function DetectorAlertas({ onResumen, onGuardarCruce, sheetsConnected, onNombreP
       usuario: r.usuario || "",
       alertas: r.flags.join(" "),
       nivel: r.nivel,
+      grupo: r.grupo,
       intervalo,
     }));
     await onGuardarCruce(rows);
@@ -1168,7 +1195,10 @@ function DetectorAlertas({ onResumen, onGuardarCruce, sheetsConnected, onNombreP
       });
       rowsH.forEach((r) => { if (!usadosH.has(r.id)) unified.push({ ...r, cruce: "solo Histórico", seqBase: r.idx }); });
 
-      const analizados = analizarMovimientos(unified);
+      // El análisis (E01–E12) corre SIEMPRE sobre el conjunto completo. El grupo se resuelve
+      // después, solo para presentar/filtrar; nunca se filtra antes de analizar (E03/E06 cruzan
+      // medicamentos y grupos entre sí).
+      const analizados = analizarMovimientos(unified).map((r) => ({ ...r, grupo: grupoDeCodigoV(medByV, r.codigoV) }));
       setResultado(analizados);
       setDiag({ libro: rowsL.length, historico: rowsH.length, cruzadas: unified.filter((u) => u.cruce === "ambos").length, hojaL: L.sheet, hojaH: H.sheet });
 
@@ -1180,9 +1210,15 @@ function DetectorAlertas({ onResumen, onGuardarCruce, sheetsConnected, onNombreP
     setProcesando(false);
   };
 
-  const vista = resultado ? (soloAlertas ? resultado.filter((r) => r.flags.length) : resultado) : [];
-  const nCrit = resultado ? resultado.filter((r) => r.nivel === "crit").length : 0;
-  const nWarn = resultado ? resultado.filter((r) => r.nivel === "warn").length : 0;
+  // Pipeline de presentación: resultado -> filtro de grupo -> filtro solo-alertas -> vista.
+  // Las filas SIN_CLASIFICAR nunca se ocultan (trazabilidad): salen en cualquier selección.
+  const grupoFiltrado = resultado ? resultado.filter((r) => grupoF === "TODOS" || r.grupo === "SIN_CLASIFICAR" || r.grupo === grupoF) : [];
+  const vista = soloAlertas ? grupoFiltrado.filter((r) => r.flags.length) : grupoFiltrado;
+  const nCrit = vista.filter((r) => r.nivel === "crit").length;        // vista filtrada
+  const nWarn = vista.filter((r) => r.nivel === "warn").length;        // vista filtrada
+  const nCritTot = resultado ? resultado.filter((r) => r.nivel === "crit").length : 0; // global
+  const nWarnTot = resultado ? resultado.filter((r) => r.nivel === "warn").length : 0; // global
+  const nSinClasif = resultado ? resultado.filter((r) => r.grupo === "SIN_CLASIFICAR").length : 0;
 
   return (
     <div>
@@ -1232,9 +1268,11 @@ function DetectorAlertas({ onResumen, onGuardarCruce, sheetsConnected, onNombreP
             </Card>
           )}
           <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
-            <Badge level="crit">{nCrit} críticas</Badge>
-            <Badge level="warn">{nWarn} de vigilar</Badge>
-            <Badge level="none">{resultado.length} movimientos</Badge>
+            <GroupFilter3 value={grupoF} onChange={setGrupoF} />
+            <Badge level="crit">{nCrit} críticas (de {nCritTot} en total)</Badge>
+            <Badge level="warn">{nWarn} de vigilar (de {nWarnTot} en total)</Badge>
+            <Badge level="none">{vista.length} movimientos (de {resultado.length} en total)</Badge>
+            {nSinClasif > 0 && <Badge level="warn">{nSinClasif} movimientos sin clasificar</Badge>}
             <label style={{ display: "inline-flex", gap: 6, alignItems: "center", fontSize: 13, color: C.text, cursor: "pointer", marginLeft: 8 }}>
               <input type="checkbox" checked={soloAlertas} onChange={(e) => setSoloAlertas(e.target.checked)} /> Ver solo movimientos con alerta
             </label>
@@ -1257,7 +1295,13 @@ function DetectorAlertas({ onResumen, onGuardarCruce, sheetsConnected, onNombreP
                 <tbody>
                   {vista.map((r) => (
                     <tr key={r.id} style={{ background: rowBg[r.nivel] }}>
-                      <td style={{ ...td, minWidth: 210 }}>{r.medicamento}{r.cruce !== "ambos" && <span style={{ marginLeft: 6, fontSize: 11, color: C.sub }}>({r.cruce})</span>}</td>
+                      <td style={{ ...td, minWidth: 210 }}>
+                        <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                          <span>{r.medicamento}</span>
+                          {r.cruce !== "ambos" && <span style={{ fontSize: 11, color: C.sub }}>({r.cruce})</span>}
+                          {r.grupo === "SIN_CLASIFICAR" && <Badge level="warn">Sin clasificar</Badge>}
+                        </div>
+                      </td>
                       <td style={{ ...td, fontFamily: "monospace", fontSize: 12 }}>{r.codigoV || "—"}</td>
                       <td style={{ ...td, whiteSpace: "nowrap" }}>{r.fechaTxt || (r.day ? fmtDate(r.day) : "—")}</td>
                       <td style={td}>{r.tipo || "—"}</td>
@@ -2480,7 +2524,7 @@ export default function App() {
         {view === "inicio" && <Inicio inventarios={inventarios} incidencias={incidencias} alertas={alertas} resumenAlertas={resumenAlertas} medByV={medByV} config={config} goTo={setView} />}
         {view === "inventario" && <InventarioSemanal onSaved={guardarInventario} avisos={avisosRepo} meds={meds} medByV={medByV} config={config} />}
         {view === "anteriores" && <InventariosAnteriores inventarios={inventarios} config={config} medByV={medByV} pedidos={pedidos} onEdit={guardarEdicionInventario} onCrearIncidencia={crearIncidenciaDesdeDescuadre} />}
-        {view === "detector" && <DetectorAlertas onResumen={registrarResumenAlertas} onGuardarCruce={guardarCruce} sheetsConnected={connected} onNombrePaciente={() => notify("⚠️ Posible nombre de paciente detectado y excluido del procesamiento", "crit")} />}
+        {view === "detector" && <DetectorAlertas onResumen={registrarResumenAlertas} onGuardarCruce={guardarCruce} sheetsConnected={connected} onNombrePaciente={() => notify("⚠️ Posible nombre de paciente detectado y excluido del procesamiento", "crit")} medByV={medByV} />}
         {view === "alertas" && <AlertasView alertas={alertas} onEstado={marcarAlerta} onPedir={pedirDesdeAlerta} />}
         {view === "pedidos" && <RegistroPedidos pedidos={pedidos} onCreate={crearPedido} onUpdate={actualizarPedido} meds={meds} cnMap={cnMap} cnCatalogo={cnCatalogo} prefill={pedidoPrefill} clearPrefill={() => setPedidoPrefill(null)} />}
         {view === "caducados" && <Caducados caducados={caducados} onCreate={crearCaducado} meds={meds} cnMap={cnMap} declaraciones={declaraciones} onNuevaDeclaracion={nuevaDeclaracion} />}
