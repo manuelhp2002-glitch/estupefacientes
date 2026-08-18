@@ -36,7 +36,9 @@ var HEADERS = {
   Incidencias: ["id", "tipo", "medicamento", "fechaHora", "movimiento", "cantidad", "sistema", "descripcion", "medida", "estado", "farmaceutico"],
   Cruces: ["id", "medicamento", "codigoV", "fecha", "tipo", "medico", "cantidad", "cantFinal", "usuario", "alertas", "nivel", "intervalo"],
   Catalogo: ["id", "codigoV", "nombre", "grupo", "min", "max"],
-  Alertas: ["id", "origen", "tipo", "codigos", "codigoV", "medicamento", "nivel", "fecha", "detalle", "estado"]
+  Alertas: ["id", "origen", "tipo", "codigos", "codigoV", "medicamento", "nivel", "fecha", "detalle", "estado"],
+  // Previsión (F7): un valor de consumo semanal por Código V (estado actual, no histórico).
+  Consumos: ["id", "codigoV", "media", "origen", "fechaCarga"]
 };
 
 // Guard de privacidad (§1): campos de nota/observación de importación donde NO debe
@@ -266,4 +268,12 @@ function setupCruces() {
   var s = ss.getSheetByName("Cruces");
   if (!s) { s = ss.insertSheet("Cruces"); s.appendRow(HEADERS.Cruces); }
   return "Cruces ok";
+}
+
+// Crea solo la pestaña Consumos (Previsión F7) sin tocar el resto. No destructivo.
+function setupConsumos() {
+  var ss = ss_();
+  var s = ss.getSheetByName("Consumos");
+  if (!s) { s = ss.insertSheet("Consumos"); s.appendRow(HEADERS.Consumos); }
+  return "Consumos ok";
 }

@@ -4,7 +4,8 @@ import {
   Home, ClipboardList, History, ShieldAlert, PackageSearch, CalendarX,
   AlertTriangle, Plus, Save, X, Upload, Search, CheckCircle2, Clock,
   Settings, RefreshCw, Cloud, CloudOff, Truck, FileSpreadsheet, Trash2,
-  ChevronRight, Info, Pill, Syringe, Filter, ArrowRight, ListChecks, Bell, Menu, Pencil
+  ChevronRight, Info, Pill, Syringe, Filter, ArrowRight, ListChecks, Bell, Menu, Pencil,
+  TrendingDown, ArrowLeft, Siren, PackageCheck, Database, BellRing, Check
 } from "lucide-react";
 
 /* ============================================================================
@@ -1864,7 +1865,7 @@ function Incidencias({ incidencias, onCreate, onUpdate, prefill, clearPrefill, m
 /* ===========================================================================
    INICIO
 =========================================================================== */
-function Inicio({ inventarios, incidencias, alertas, resumenAlertas, medByV, config, goTo }) {
+function Inicio({ inventarios, incidencias, alertas, resumenAlertas, medByV, config, goTo, avisosPrevision = [], hayConsumos }) {
   const fechas = [...new Set(inventarios.map((r) => r.fecha))].sort().reverse();
   const ultima = fechas[0];
   const ultInv = inventarios.filter((r) => r.fecha === ultima);
@@ -1937,6 +1938,34 @@ function Inicio({ inventarios, incidencias, alertas, resumenAlertas, medByV, con
             </div>
           </div>
         )}
+      </Card>
+
+      {/* Previsión: hay que pedir (avisos calculados al cargar, F7) */}
+      <Card style={{ marginBottom: 16, borderColor: avisosPrevision.length ? (avisosPrevision.some((a) => a.nivel === "crit") ? C.red : C.yellow) : C.border }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+          <div style={{ fontSize: 16, fontWeight: 800, color: C.text, display: "flex", gap: 8, alignItems: "center" }}><TrendingDown size={18} /> Previsión de pedidos</div>
+          <button style={btnGhost} onClick={() => goTo("prevision")}>Ver previsión <ArrowRight size={14} /></button>
+        </div>
+        {!hayConsumos ? (
+          <div style={{ marginTop: 10, fontSize: 13, color: C.sub }}>No hay consumos registrados. Introdúcelos en Previsión para calcular cuándo pedir cada estupefaciente.</div>
+        ) : avisosPrevision.length === 0 ? (
+          <div style={{ marginTop: 10, display: "flex", gap: 8, alignItems: "center", color: C.green, fontWeight: 700, fontSize: 14 }}><CheckCircle2 size={18} /> Ningún estupefaciente requiere pedido en los próximos 15 días.</div>
+        ) : (<>
+          <div style={{ fontWeight: 700, color: C.text, marginTop: 10, display: "flex", gap: 8, alignItems: "center" }}>
+            <BellRing size={16} color={avisosPrevision.some((a) => a.nivel === "crit") ? C.red : C.yellow} />
+            Hay que pedir {avisosPrevision.length} {avisosPrevision.length === 1 ? "estupefaciente" : "estupefacientes"}
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(280px,1fr))", gap: 8, marginTop: 10 }}>
+            {avisosPrevision.map((a) => (
+              <button key={a.codigoV} onClick={() => goTo("prevision")} style={{ textAlign: "left", cursor: "pointer", border: `1px solid ${C.border}`, borderRadius: 10, padding: "8px 11px", background: a.nivel === "crit" ? C.redBg : C.yellowBg }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{a.nombre}</div>
+                <div style={{ fontSize: 12, color: C.sub, marginTop: 2 }}><span style={{ fontFamily: "monospace" }}>{a.codigoV}</span> · {a.accion} · {a.dias === 0 ? "hoy" : `en ${a.dias} días`}</div>
+                <div style={{ fontSize: 11.5, color: C.sub, marginTop: 2 }}>stock {a.stock} uds · umbral {a.umbral}</div>
+              </button>
+            ))}
+          </div>
+          <div style={{ fontSize: 11.5, color: C.sub, marginTop: 9 }}>No se avisa de los que ya tienen pedido en curso registrado en el Registro de pedidos.</div>
+        </>)}
       </Card>
 
       {/* Detector de alertas (resumen del último análisis) */}
@@ -2243,10 +2272,711 @@ function ConfiguracionView({ config, onSave, cnCatalogo, meds, onSaveCn, onSaveN
 /* ===========================================================================
    APP PRINCIPAL
 =========================================================================== */
+/* ===========================================================================
+   7) PREVISIÓN (F7)
+   Estima cuándo pedir cada estupefaciente cruzando: stock histórico (pestaña
+   Inventarios, campo `real`), pedidos en curso (Pedidos, estado Pendiente),
+   consumo medio semanal (pestaña Consumos + export .xlsx) y umbrales del
+   catálogo (max = laboratorio, min = COFARTE). Reutiliza catálogo y helpers del
+   archivo (medByV, ALL_MEDS, extraerCodigoV, estadoPedido, todayISO, C, Card,
+   Badge, Field, GroupFilter3). Sin datos de paciente. El CN no aparece aquí.
+=========================================================================== */
+const DIA = 86400000;
+const VENTANA_DIAS = 62;          // histórico de stock ≈ 2 meses
+const UMBRAL_AMARILLO = 15;       // pedir a laboratorio en menos de 15 días
+const UMBRAL_ROJO = 3;            // pedir a laboratorio en menos de 3 días
+const CONSUMO_CADUCA = 45;        // un consumo con más de 45 días se marca desactualizado
+
+const addDays = (d, n) => new Date(d.getTime() + n * DIA);
+const hoy0 = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; };
+const fmtCorta = (d) => `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}`;
+const fmtLarga = (d) => `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`;
+const DIAS_SEM = ["domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"];
+const fmtConDia = (d) => `${DIAS_SEM[d.getDay()]} ${fmtLarga(d)}`;
+function parseFechaISO(v) {
+  if (!v) return null;
+  const d = new Date(v);
+  return isNaN(d.getTime()) ? null : d;
+}
+const diasDesde = (iso) => { const d = parseFechaISO(iso); return d ? Math.floor((Date.now() - d.getTime()) / DIA) : null; };
+
+// CONEXIÓN 1 — serie de stock de un medicamento desde la pestaña Inventarios (campo `real`).
+// Solo `real` (recuento físico, la verdad del proyecto); nunca d07/maestro. Últimos 62 días,
+// dedup por día (gana el último), orden ascendente. Sin relleno simulado.
+function historicoDesdeInventarios(codigoV, inventarios) {
+  const corte = Date.now() - VENTANA_DIAS * DIA;
+  const puntos = (inventarios || [])
+    .filter((r) => r.codigoV === codigoV)
+    .map((r) => ({ fecha: parseFechaISO(r.fecha), stock: Number(r.real) }))
+    .filter((p) => p.fecha && isFinite(p.stock) && p.fecha.getTime() >= corte)
+    .sort((a, b) => a.fecha - b.fecha);
+  const porFecha = new Map();
+  puntos.forEach((p) => porFecha.set(p.fecha.toISOString().slice(0, 10), p)); // gana el último del día
+  return [...porFecha.values()].sort((a, b) => a.fecha - b.fecha);
+}
+
+// CONEXIÓN 2 — pedidos en curso (estado Pendiente) de un Código V. Reutiliza estadoPedido y
+// extraerCodigoV; vincula por Código V extraído de p.estupefaciente, nunca por nombre.
+function pedidosEnCurso(codigoV, pedidos) {
+  return (pedidos || [])
+    .filter((p) => estadoPedido(p) === "Pendiente")
+    .filter((p) => extraerCodigoV(p.estupefaciente) === codigoV)
+    .map((p) => ({
+      vale: p.vale, proveedor: p.proveedor,
+      uds: Number(p.udsPedidas) || 0,
+      fechaPedido: parseFechaISO(p.fechaPedido),
+      avisoLlegada: !!p.avisoLlegada,
+    }));
+}
+
+// Consumo semanal válido (>0) guardado para un Código V, o null. Tolera coma decimal.
+function mediaConsumoValida(consumosArr, codigoV) {
+  const c = (consumosArr || []).find((x) => x.codigoV === codigoV);
+  if (!c) return null;
+  const v = Number(String(c.media ?? "").replace(",", "."));
+  return isFinite(v) && v > 0 ? v : null;
+}
+
+// MOTOR — cruza stock, consumo, umbrales y pedidos. Sin histórico simulado: si hay menos de
+// dos inventarios en la ventana, se proyecta desde el único punto (o desde una corrección
+// manual de stock); si no hay ninguno ni corrección, no se puede prever (sinDatos).
+function preverMedicamento(med, consumoSemanal, ctx) {
+  const { inventarios, pedidos, stockOverride } = ctx;
+  const historico = historicoDesdeInventarios(med.codigoV, inventarios);
+  const pocosDatos = historico.length < 2;
+  const hayOverride = stockOverride != null && stockOverride !== "";
+
+  const ultimo = historico.length ? historico[historico.length - 1] : null;
+  let origen = null, stockActual = null;
+  if (ultimo) { stockActual = hayOverride ? Number(stockOverride) : ultimo.stock; origen = { fecha: ultimo.fecha, stock: stockActual }; }
+  else if (hayOverride) { stockActual = Number(stockOverride); origen = { fecha: hoy0(), stock: stockActual }; }
+  const sinDatos = origen == null;
+
+  const consumoDiario = consumoSemanal / 7;
+  const tieneUmbrales = med.max != null && med.min != null && !(med.max === 0 && med.min === 0);
+  const enCurso = pedidosEnCurso(med.codigoV, pedidos);
+  const udsEnCurso = enCurso.reduce((s, p) => s + p.uds, 0);
+
+  const cruce = (umbral) => {
+    if (sinDatos || !tieneUmbrales || consumoDiario <= 0) return null;
+    if (stockActual <= umbral) return { fecha: origen.fecha, yaPasado: true };
+    return { fecha: addDays(origen.fecha, Math.floor((stockActual - umbral) / consumoDiario)), yaPasado: false };
+  };
+  const cruceLab = cruce(med.max);
+  const cruceCofarte = cruce(med.min);
+
+  const historicoPlot = ultimo ? historico : (origen ? [{ fecha: origen.fecha, stock: origen.stock }] : []);
+  const proyeccion = [];
+  if (!sinDatos && consumoDiario > 0) {
+    const semanas = Math.min(Math.max(Math.ceil(stockActual / Math.max(consumoSemanal, 0.001)) + 1, 5), 26);
+    for (let s = 0; s <= semanas; s++) {
+      const stock = Math.max(0, stockActual - consumoSemanal * s);
+      proyeccion.push({ fecha: addDays(origen.fecha, s * 7), stock });
+      if (stock === 0) break; // se corta en 0; sin cola plana
+    }
+  }
+
+  const dias = (c) => c ? Math.round((c.fecha - hoy0().getTime()) / DIA) : null;
+  const dLab = dias(cruceLab), dCof = dias(cruceCofarte);
+
+  let urgencia;
+  if (sinDatos || !tieneUmbrales || consumoDiario <= 0) urgencia = "none";
+  else if (enCurso.length) urgencia = "pedido";
+  else if (cruceLab.yaPasado || dLab < UMBRAL_ROJO) urgencia = "crit";
+  else if (dLab < UMBRAL_AMARILLO) urgencia = "warn";
+  else urgencia = "ok";
+
+  return {
+    med, consumoSemanal, consumoDiario, historico: historicoPlot, proyeccion, origen, pocosDatos, sinDatos,
+    stockActual, tieneUmbrales, cruceLab, cruceCofarte, dLab, dCof, urgencia, enCurso, udsEnCurso,
+  };
+}
+
+// CONEXIÓN 5 — avisos «hay que pedir» para la pantalla de Inicio. No se avisa de lo que ya
+// tiene pedido en curso, ni de lo que no tiene umbrales/consumo. Orden: días ascendente.
+function construirAvisos(previsiones) {
+  return previsiones
+    .filter((p) => p.tieneUmbrales && !p.enCurso.length && (p.urgencia === "crit" || p.urgencia === "warn"))
+    .map((p) => ({
+      codigoV: p.med.codigoV, nombre: p.med.nombre, grupo: p.med.grupo,
+      nivel: p.urgencia,
+      accion: p.cruceCofarte.yaPasado ? "Pedido urgente a COFARTE" : "Pedir a laboratorio",
+      fecha: p.cruceLab.yaPasado ? hoy0() : p.cruceLab.fecha,
+      dias: Math.max(p.dLab, 0), stock: Math.round(p.stockActual), umbral: p.med.max,
+    }))
+    .sort((a, b) => a.dias - b.dias);
+}
+
+const COLOR_URGENCIA = { crit: C.red, warn: C.yellow, ok: C.green, pedido: C.green, none: C.border };
+
+/* --------- Gráfica SVG (sin dependencias) --------- */
+function suavizar(pts) {
+  if (pts.length < 2) return "";
+  let d = `M ${pts[0].x} ${pts[0].y}`;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[i - 1] || pts[i], p1 = pts[i], p2 = pts[i + 1], p3 = pts[i + 2] || p2;
+    d += ` C ${p1.x + (p2.x - p0.x) / 6} ${p1.y + (p2.y - p0.y) / 6}, ${p2.x - (p3.x - p1.x) / 6} ${p2.y - (p3.y - p1.y) / 6}, ${p2.x} ${p2.y}`;
+  }
+  return d;
+}
+function ticksSinSolape(puntos, sep) {
+  if (!puntos.length) return [];
+  const orden = [...puntos].sort((a, b) => a.x - b.x);
+  const elegidos = [orden[0]];
+  for (let i = 1; i < orden.length - 1; i++) {
+    if (orden[i].x - elegidos[elegidos.length - 1].x >= sep) elegidos.push(orden[i]);
+  }
+  const ultimo = orden[orden.length - 1];
+  if (orden.length > 1) {
+    while (elegidos.length > 1 && ultimo.x - elegidos[elegidos.length - 1].x < sep) elegidos.pop();
+    elegidos.push(ultimo);
+  }
+  return elegidos;
+}
+function Grafica({ p }) {
+  const [hover, setHover] = useState(null);
+  const W = 760, H = 300, ML = 52, MR = 24, MT = 46, MB = 34;
+  const todos = [...p.historico, ...p.proyeccion];
+  if (!todos.length) return null;
+
+  const t0 = todos[0].fecha.getTime(), t1 = todos[todos.length - 1].fecha.getTime();
+  const maxY = Math.max(...todos.map((d) => d.stock), p.tieneUmbrales ? p.med.max : 0) * 1.12 || 10;
+  const X = (t) => ML + ((t - t0) / Math.max(t1 - t0, 1)) * (W - ML - MR);
+  const Y = (v) => MT + (1 - v / maxY) * (H - MT - MB);
+  const mapP = (arr) => arr.map((d) => ({ ...d, x: X(d.fecha.getTime()), y: Y(d.stock) }));
+  const hist = mapP(p.historico), proy = mapP(p.proyeccion);
+  const ticksY = [0, 0.25, 0.5, 0.75, 1].map((f) => Math.round(maxY * f));
+  const hoyX = X(p.origen.fecha.getTime());
+  const marcasX = ticksSinSolape([...hist, ...proy.slice(1)], 54);
+
+  const marca = (cruce, color, texto, fila) => {
+    if (!cruce || cruce.yaPasado) return null;
+    const xr = X(cruce.fecha.getTime());
+    const x = Math.min(Math.max(xr, ML + 46), W - MR - 46);
+    const y = fila === 0 ? 4 : 23;
+    return (
+      <g>
+        <line x1={xr} y1={MT} x2={xr} y2={H - MB} stroke={color} strokeWidth="1.3" strokeDasharray="3 4" opacity="0.8" />
+        <rect x={x - 45} y={y} width="90" height="16" rx="8" fill={color} />
+        <text x={x} y={y + 11.5} textAnchor="middle" fontSize="10" fontWeight="700" fill="#fff">{texto} {fmtCorta(cruce.fecha)}</text>
+      </g>
+    );
+  };
+
+  return (
+    <div style={{ position: "relative", maxWidth: 860, margin: "0 auto" }}>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto", display: "block" }} role="img"
+        aria-label={`Evolución de stock de ${p.med.nombre} con previsión de consumo`}>
+        {ticksY.map((v, i) => (
+          <g key={i}>
+            <line x1={ML} y1={Y(v)} x2={W - MR} y2={Y(v)} stroke={C.border} strokeWidth="1" />
+            <text x={ML - 8} y={Y(v) + 3.5} textAnchor="end" fontSize="10" fill={C.sub}>{v}</text>
+          </g>
+        ))}
+        <rect x={hoyX} y={MT} width={Math.max(W - MR - hoyX, 0)} height={H - MT - MB} fill={C.accent} opacity="0.04" />
+        <line x1={hoyX} y1={MT} x2={hoyX} y2={H - MB} stroke={C.indigo2} strokeWidth="1.5" />
+        <text x={hoyX - 6} y={H - MB - 7} textAnchor="end" fontSize="9.5" fontWeight="700" fill={C.indigo2} opacity="0.8">último recuento</text>
+        {p.tieneUmbrales && (
+          <>
+            <line x1={ML} y1={Y(p.med.max)} x2={W - MR} y2={Y(p.med.max)} stroke={C.yellow} strokeWidth="1.3" strokeDasharray="6 5" />
+            <text x={ML + 3} y={Y(p.med.max) - 5} fontSize="9.5" fontWeight="700" fill={C.yellow}>umbral laboratorio · {p.med.max}</text>
+            <line x1={ML} y1={Y(p.med.min)} x2={W - MR} y2={Y(p.med.min)} stroke={C.red} strokeWidth="1.3" strokeDasharray="6 5" />
+            <text x={ML + 3} y={Y(p.med.min) - 5} fontSize="9.5" fontWeight="700" fill={C.red}>umbral COFARTE · {p.med.min}</text>
+          </>
+        )}
+        {marca(p.cruceLab, C.yellow, "laboratorio", 0)}
+        {marca(p.cruceCofarte, C.red, "COFARTE", 1)}
+        {proy.length > 1 && <path d={proy.map((d, i) => `${i ? "L" : "M"} ${d.x} ${d.y}`).join(" ")} fill="none" stroke={C.accent} strokeWidth="2.2" strokeDasharray="7 5" strokeLinecap="round" />}
+        <path d={suavizar(hist)} fill="none" stroke={C.indigo2} strokeWidth="2.4" strokeLinecap="round" />
+        {proy.slice(1).map((d, i) => (
+          <circle key={`p${i}`} cx={d.x} cy={d.y} r="4" fill="#fff" stroke={C.accent} strokeWidth="2"
+            onMouseEnter={() => setHover({ ...d, tipo: "Previsto" })} onMouseLeave={() => setHover(null)} style={{ cursor: "pointer" }} />
+        ))}
+        {hist.map((d, i) => (
+          <circle key={`h${i}`} cx={d.x} cy={d.y} r="4.2" fill={C.indigo2} stroke="#fff" strokeWidth="1.6"
+            onMouseEnter={() => setHover({ ...d, tipo: "Inventario" })} onMouseLeave={() => setHover(null)} style={{ cursor: "pointer" }} />
+        ))}
+        <line x1={ML} y1={H - MB} x2={W - MR} y2={H - MB} stroke={C.indigo} strokeWidth="1.6" />
+        {marcasX.map((d, i) => (
+          <text key={i} x={d.x} y={H - MB + 14} textAnchor="middle" fontSize="9.5" fill={C.sub}>{fmtCorta(d.fecha)}</text>
+        ))}
+      </svg>
+      {hover && (
+        <div style={{
+          position: "absolute", left: `${(hover.x / W) * 100}%`, top: `${(hover.y / H) * 100}%`,
+          transform: "translate(-50%, -132%)", background: C.indigo, color: "#fff", padding: "5px 9px",
+          borderRadius: 8, fontSize: 11.5, fontWeight: 600, whiteSpace: "nowrap", pointerEvents: "none",
+        }}>{hover.tipo} · {fmtLarga(hover.fecha)} · {Math.round(hover.stock)} uds</div>
+      )}
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap", fontSize: 11.5, color: C.sub, marginTop: 4, paddingLeft: 4 }}>
+        <span><span style={{ display: "inline-block", width: 10, height: 10, borderRadius: 999, background: C.indigo2, marginRight: 5, verticalAlign: -1 }} />Stock de los inventarios semanales</span>
+        <span><span style={{ display: "inline-block", width: 10, height: 10, borderRadius: 999, background: "#fff", border: `2px solid ${C.accent}`, marginRight: 5, verticalAlign: -1 }} />Previsión según consumo medio</span>
+      </div>
+    </div>
+  );
+}
+function Mini({ p }) {
+  const w = 132, h = 42;
+  const todos = [...p.historico, ...p.proyeccion];
+  if (!todos.length) return null;
+  const t0 = todos[0].fecha.getTime(), t1 = todos[todos.length - 1].fecha.getTime();
+  const maxY = Math.max(...todos.map((d) => d.stock), 1) * 1.1;
+  const X = (t) => ((t - t0) / Math.max(t1 - t0, 1)) * w;
+  const Y = (v) => 3 + (1 - v / maxY) * (h - 6);
+  const l = (arr) => arr.map((d, i) => `${i ? "L" : "M"} ${X(d.fecha.getTime())} ${Y(d.stock)}`).join(" ");
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} width={w} height={h} aria-hidden="true">
+      {p.tieneUmbrales && <line x1="0" y1={Y(p.med.min)} x2={w} y2={Y(p.med.min)} stroke={C.red} strokeWidth="1" strokeDasharray="3 3" opacity="0.6" />}
+      <path d={l(p.historico)} fill="none" stroke={C.indigo2} strokeWidth="2" />
+      <path d={l(p.proyeccion)} fill="none" stroke={C.accent} strokeWidth="2" strokeDasharray="4 3" />
+    </svg>
+  );
+}
+
+// CONEXIÓN 3 — export "Consumo Medio" (.xlsx). Cabecera detectada por nombre de columna
+// (no índice fijo), recorre hojas y se queda con la de más filas válidas, deduplica por
+// Código V (el export repite la primera fila al final), valida contra /^[VYT]\d{5}$/.
+function leerConsumoMedio(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const wb = XLSX.read(e.target.result, { type: "array" });
+        let mejor = { filas: [], hoja: "" };
+        wb.SheetNames.forEach((nombre) => {
+          const aoa = XLSX.utils.sheet_to_json(wb.Sheets[nombre], { header: 1, defval: "", raw: true });
+          let hr = -1, cCod = -1, cMedia = -1;
+          for (let i = 0; i < Math.min(aoa.length, 25); i++) {
+            const fila = (aoa[i] || []).map((c) => String(c).toLowerCase());
+            const ic = fila.findIndex((c) => c.includes("medicamento") && (c.includes("código") || c.includes("codigo")));
+            const im = fila.findIndex((c) => c.includes("media") && c.includes("semanal"));
+            if (ic >= 0 && im >= 0) { hr = i; cCod = ic; cMedia = im; break; }
+          }
+          if (hr < 0) return;
+          const cNombre = (aoa[hr] || []).findIndex((c) => String(c).toLowerCase().includes("denominaci"));
+          const filas = [], vistos = new Set();
+          for (let i = hr + 1; i < aoa.length; i++) {
+            const r = aoa[i] || [];
+            const cod = String(r[cCod] || "").trim().toUpperCase();
+            const media = Number(r[cMedia]);
+            if (!/^[VYT]\d{5}$/.test(cod) || !isFinite(media)) continue;
+            if (vistos.has(cod)) continue;
+            vistos.add(cod);
+            filas.push({ codigoV: cod, media, nombreExport: cNombre >= 0 ? String(r[cNombre] || "").trim() : "" });
+          }
+          if (filas.length > mejor.filas.length) mejor = { filas, hoja: nombre };
+        });
+        resolve(mejor);
+      } catch (err) { reject(err); }
+    };
+    reader.onerror = () => reject(new Error("no se pudo leer el archivo"));
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+function PrevFila({ color, icono, etiqueta, valor }) {
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, fontSize: 12 }}>
+      <span style={{ display: "inline-flex", gap: 5, alignItems: "center", color, fontWeight: 700 }}>{icono}{etiqueta}</span>
+      <span style={{ color: C.text, fontWeight: 600 }}>{valor}</span>
+    </div>
+  );
+}
+function PrevDato({ label, valor }) {
+  return (
+    <div>
+      <div style={{ fontSize: 11, color: C.sub, fontWeight: 600 }}>{label}</div>
+      <div style={{ fontSize: 17, fontWeight: 700, color: C.text }}>{valor}</div>
+    </div>
+  );
+}
+function PrevMarco({ children }) {
+  return (
+    <div>
+      <SectionTitle title="Previsión de pedidos" desc="Cuándo hay que pedir cada estupefaciente, según el stock de los inventarios semanales, el consumo medio y los pedidos ya cursados." />
+      <div style={{ background: "#EEF0FF", border: `1px solid ${C.accent}33`, color: C.indigo2, borderRadius: 12, padding: "9px 13px", marginBottom: 16, fontSize: 12.5, display: "flex", gap: 8, alignItems: "center" }}>
+        <Database size={15} /> Verde: más de 15 días o pedido ya cursado · Amarillo: pedir a laboratorio en menos de 15 días · Rojo: menos de 3 días
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function Prevision({ inventarios = [], pedidos = [], consumosGuardados = [], onGuardarConsumos, onAvisos }) {
+  const [consumos, setConsumos] = useState(() => {
+    const m = {};
+    (consumosGuardados || []).forEach((c) => {
+      if (medByV[c.codigoV]) m[c.codigoV] = { media: String(c.media ?? ""), fechaCarga: c.fechaCarga, origen: c.origen || "guardado" };
+    });
+    return m;
+  });
+  const [pantalla, setPantalla] = useState("revision");
+  const [noCatalogo, setNoCatalogo] = useState([]);
+  const [fuente, setFuente] = useState(consumosGuardados.length ? `${consumosGuardados.length} consumos guardados` : "");
+  const [error, setError] = useState("");
+  const [cargando, setCargando] = useState(false);
+  const [guardado, setGuardado] = useState(false);
+  const [grupo, setGrupo] = useState("TODOS");
+  const [soloConConsumo, setSoloConConsumo] = useState(false);
+  const [detalle, setDetalle] = useState(null);
+  const [stockManual, setStockManual] = useState({});
+  const inputRef = useRef(null);
+
+  const consumoValido = (codigoV) => {
+    const v = Number(String(consumos[codigoV]?.media ?? "").replace(",", "."));
+    return isFinite(v) && v > 0 ? v : null;
+  };
+  const conConsumo = ALL_MEDS.filter((m) => consumoValido(m.codigoV) != null);
+  const sinConsumo = ALL_MEDS.filter((m) => consumoValido(m.codigoV) == null);
+
+  const previsiones = useMemo(() => conConsumo
+    .map((m) => preverMedicamento(m, consumoValido(m.codigoV), { inventarios, pedidos, stockOverride: stockManual[m.codigoV] }))
+    .sort((a, b) => {
+      const rank = { crit: 0, warn: 1, ok: 2, pedido: 3, none: 4 };
+      if (rank[a.urgencia] !== rank[b.urgencia]) return rank[a.urgencia] - rank[b.urgencia];
+      return (a.dLab ?? 9999) - (b.dLab ?? 9999);
+    }), [consumos, stockManual, inventarios, pedidos]); // eslint-disable-line
+
+  const avisos = useMemo(() => construirAvisos(previsiones), [previsiones]);
+  useEffect(() => { if (onAvisos && pantalla === "lista") onAvisos(avisos); }, [avisos, pantalla]); // eslint-disable-line
+
+  const setMedia = (codigoV, valor) => {
+    setGuardado(false);
+    setConsumos((prev) => ({
+      ...prev,
+      [codigoV]: { ...(prev[codigoV] || {}), media: valor.replace(/[^\d.,]/g, ""), fechaCarga: todayISO(), origen: "manual", tocado: true },
+    }));
+  };
+
+  const cargarArchivo = async (file) => {
+    if (!file) return;
+    setError(""); setCargando(true); setGuardado(false);
+    try {
+      const { filas, hoja } = await leerConsumoMedio(file);
+      if (!filas.length) {
+        setError("No se encontraron las columnas «Medicamento Código» y «Media Semanal». Comprueba que es el export de Consumo Medio del SADE.");
+      } else {
+        setConsumos((prev) => {
+          const m = { ...prev };
+          filas.forEach((f) => {
+            if (!medByV[f.codigoV]) return;
+            const anterior = prev[f.codigoV]?.media;
+            m[f.codigoV] = {
+              media: f.media.toFixed(1), fechaCarga: todayISO(), origen: "archivo",
+              tocado: true, anterior: anterior != null ? String(anterior) : null,
+            };
+          });
+          return m;
+        });
+        setNoCatalogo(filas.filter((f) => !medByV[f.codigoV]));
+        setFuente(`${file.name}${hoja ? ` · hoja "${hoja}"` : ""} · ${filas.length} medicamentos`);
+      }
+    } catch (e) { setError("No se pudo procesar el archivo: " + e.message); }
+    setCargando(false);
+  };
+
+  const guardarConsumos = async () => {
+    if (!onGuardarConsumos) { setGuardado(true); return; }
+    const filas = conConsumo.map((m) => ({
+      codigoV: m.codigoV, media: consumoValido(m.codigoV),
+      origen: consumos[m.codigoV]?.origen || "manual",
+      fechaCarga: consumos[m.codigoV]?.fechaCarga || todayISO(),
+    }));
+    await onGuardarConsumos(filas);
+    setGuardado(true);
+  };
+
+  const det = detalle ? previsiones.find((p) => p.med.codigoV === detalle) : null;
+
+  /* PANTALLA 1 · REVISIÓN DE CONSUMOS */
+  if (pantalla === "revision") {
+    const filas = ALL_MEDS
+      .filter((m) => grupo === "TODOS" || m.grupo === grupo)
+      .filter((m) => !soloConConsumo || consumoValido(m.codigoV) != null);
+    const desactualizados = conConsumo.filter((m) => {
+      const d = diasDesde(consumos[m.codigoV]?.fechaCarga);
+      return d != null && d > CONSUMO_CADUCA;
+    }).length;
+
+    return (
+      <PrevMarco>
+        <Card style={{ marginBottom: 14 }}>
+          <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+            <div style={{ flex: 1, minWidth: 280 }}>
+              <div style={{ fontWeight: 700, color: C.text }}>Consumos semanales</div>
+              <p style={{ fontSize: 13, color: C.sub, margin: "4px 0 0" }}>
+                Se conservan los del último uso. Actualiza los que quieras, deja el resto como están.
+                Un medicamento sin consumo no entra en la previsión.
+              </p>
+            </div>
+            <button style={btnGhost} onClick={() => inputRef.current?.click()}>
+              {cargando ? <RefreshCw size={15} /> : <Upload size={15} />}{cargando ? "Leyendo…" : "Actualizar desde archivo (.xlsx)"}
+            </button>
+            <input ref={inputRef} type="file" accept=".xlsx,.xls" style={{ display: "none" }} onChange={(e) => cargarArchivo(e.target.files[0])} />
+            <button style={btnGhost} onClick={guardarConsumos} disabled={!conConsumo.length}>
+              {guardado ? <Check size={15} /> : <Save size={15} />}{guardado ? "Consumos guardados" : "Guardar consumos"}
+            </button>
+            <button style={{ ...btnPrimary, opacity: conConsumo.length ? 1 : 0.5 }} disabled={!conConsumo.length} onClick={() => setPantalla("lista")}>
+              <TrendingDown size={16} /> Ver previsión ({conConsumo.length})
+            </button>
+          </div>
+          <div style={{ display: "flex", gap: 10, marginTop: 14, flexWrap: "wrap", alignItems: "center" }}>
+            <GroupFilter3 value={grupo} onChange={setGrupo} />
+            <Badge level="ok">{conConsumo.length} con consumo</Badge>
+            <Badge level={sinConsumo.length ? "warn" : "none"}>{sinConsumo.length} sin consumo</Badge>
+            {desactualizados > 0 && <Badge level="warn">{desactualizados} con más de {CONSUMO_CADUCA} días</Badge>}
+            <label style={{ display: "inline-flex", gap: 6, alignItems: "center", fontSize: 13, color: C.text, cursor: "pointer", marginLeft: 4 }}>
+              <input type="checkbox" checked={soloConConsumo} onChange={(e) => setSoloConConsumo(e.target.checked)} /> Ver solo los que tienen consumo
+            </label>
+            <span style={{ fontSize: 12, color: C.sub, marginLeft: "auto" }}>{fuente}</span>
+          </div>
+          {error && <div style={{ marginTop: 12, color: C.red, fontSize: 13 }}>{error}</div>}
+          {!conConsumo.length && (
+            <div style={{ marginTop: 12, background: C.yellowBg, border: `1px solid ${C.yellow}`, color: "#854d0e", borderRadius: 10, padding: "9px 12px", fontSize: 13, display: "flex", gap: 8, alignItems: "center" }}>
+              <AlertTriangle size={15} /> No hay ningún consumo registrado. Sube el archivo del SADE o introduce al menos un consumo a mano para poder calcular la previsión.
+            </div>
+          )}
+        </Card>
+
+        <Card style={{ padding: 0, overflow: "hidden" }}>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 720 }}>
+              <thead><tr>
+                <th style={th}>Medicamento</th><th style={th}>Código V</th>
+                <th style={th}>Consumo semanal (uds)</th><th style={th}>Última actualización</th><th style={th}>Estado</th>
+              </tr></thead>
+              <tbody>
+                {filas.map((m) => {
+                  const c = consumos[m.codigoV] || {};
+                  const valido = consumoValido(m.codigoV) != null;
+                  const d = diasDesde(c.fechaCarga);
+                  let estado = <Badge level="warn">Falta consumo</Badge>;
+                  if (valido && c.tocado) estado = <Badge level="info">Actualizado ahora</Badge>;
+                  else if (valido && d != null && d > CONSUMO_CADUCA) estado = <Badge level="warn">Hace {d} días — conviene revisar</Badge>;
+                  else if (valido) estado = <Badge level="ok">Vigente</Badge>;
+                  return (
+                    <tr key={m.codigoV} style={{ background: valido ? "#fff" : "#FFFDF5" }}>
+                      <td style={{ ...td, minWidth: 250 }}>
+                        {m.grupo === "ORAL" ? <Pill size={13} color={C.sub} style={{ verticalAlign: -2, marginRight: 6 }} /> : <Syringe size={13} color={C.sub} style={{ verticalAlign: -2, marginRight: 6 }} />}
+                        {m.nombre}
+                      </td>
+                      <td style={{ ...td, fontFamily: "monospace", fontSize: 12 }}>{m.codigoV}</td>
+                      <td style={td}>
+                        <input value={c.media ?? ""} onChange={(e) => setMedia(m.codigoV, e.target.value)} inputMode="decimal" placeholder="—"
+                          style={{ width: 92, padding: "6px 9px", border: `1px solid ${valido ? C.border : C.yellow}`, borderRadius: 8, fontSize: 13, textAlign: "center" }} />
+                        {c.anterior && c.anterior !== c.media && <span style={{ fontSize: 11, color: C.sub, marginLeft: 7 }}>antes {c.anterior}</span>}
+                      </td>
+                      <td style={{ ...td, fontSize: 12, color: C.sub }}>{c.fechaCarga ? fmtLarga(parseFechaISO(c.fechaCarga)) : "—"}</td>
+                      <td style={td}>{estado}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+
+        {noCatalogo.length > 0 && (
+          <Card style={{ marginTop: 14, borderColor: C.yellow, background: C.yellowBg }}>
+            <div style={{ fontWeight: 700, color: C.text, display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
+              <AlertTriangle size={15} /> Con consumo en el archivo pero fuera del catálogo oficial ({noCatalogo.length})
+            </div>
+            <ul style={{ margin: "7px 0 0", paddingLeft: 20, fontSize: 12.5, color: C.text }}>
+              {noCatalogo.map((c) => (
+                <li key={c.codigoV}>{c.nombreExport || "sin denominación"} — <b style={{ fontFamily: "monospace" }}>{c.codigoV}</b> · {c.media.toFixed(1)} uds/semana</li>
+              ))}
+            </ul>
+            <div style={{ fontSize: 11.5, color: C.sub, marginTop: 6 }}>Sin umbrales definidos no se les puede calcular fecha de pedido.</div>
+          </Card>
+        )}
+      </PrevMarco>
+    );
+  }
+
+  /* PANTALLA 3 · DETALLE */
+  if (det) {
+    const linea = (cruce, dias, umbral) => {
+      if (!det.tieneUmbrales) return <Badge level="none">Sin umbrales definidos en catálogo</Badge>;
+      if (!cruce) return <Badge level="none">Sin previsión</Badge>;
+      if (cruce.yaPasado) return <Badge level="crit">Pedir ya — el stock ya está por debajo de {umbral}</Badge>;
+      return (
+        <div>
+          <div style={{ fontSize: 19, fontWeight: 800, color: C.text, textTransform: "capitalize" }}>{fmtConDia(cruce.fecha)}</div>
+          <div style={{ fontSize: 12, color: C.sub, marginTop: 2 }}>dentro de {dias} días · el stock baja de {umbral} uds</div>
+        </div>
+      );
+    };
+    return (
+      <PrevMarco>
+        <button style={{ ...btnGhost, marginBottom: 14 }} onClick={() => setDetalle(null)}><ArrowLeft size={15} /> Volver a la lista</button>
+        <Card style={{ marginBottom: 16, borderLeft: `4px solid ${COLOR_URGENCIA[det.urgencia]}` }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 14, flexWrap: "wrap" }}>
+            <div>
+              <div style={{ fontSize: 20, fontWeight: 800, color: C.text }}>{det.med.nombre}</div>
+              <div style={{ fontSize: 12, color: C.sub, marginTop: 3, fontFamily: "monospace" }}>{det.med.codigoV} · {det.med.grupo === "ORAL" ? "oral" : "intravenoso / transdérmico"}</div>
+            </div>
+            <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
+              <PrevDato label="Stock actual" valor={det.sinDatos ? "—" : `${Math.round(det.stockActual)} uds`} />
+              <PrevDato label="Consumo semanal" valor={`${det.consumoSemanal.toFixed(1)} uds`} />
+              <PrevDato label="Consumo diario" valor={`${det.consumoDiario.toFixed(2)} uds`} />
+            </div>
+          </div>
+        </Card>
+
+        {det.enCurso.length > 0 && (
+          <Card style={{ marginBottom: 16, background: C.greenBg, borderColor: C.green }}>
+            <div style={{ fontWeight: 700, color: C.green, display: "flex", gap: 8, alignItems: "center" }}>
+              <PackageCheck size={17} /> Ya hay pedido en curso — {det.udsEnCurso} uds pendientes de recibir
+            </div>
+            <ul style={{ margin: "8px 0 0", paddingLeft: 20, fontSize: 13, color: C.text }}>
+              {det.enCurso.map((p, i) => (
+                <li key={i}>Vale {p.vale || "—"} · {p.uds} uds · {p.proveedor || "proveedor sin indicar"}
+                  {p.fechaPedido ? ` · pedido el ${fmtLarga(p.fechaPedido)}` : ""}{p.avisoLlegada ? " · llegada avisada" : ""}</li>
+              ))}
+            </ul>
+            <div style={{ fontSize: 12, color: C.sub, marginTop: 8 }}>
+              La gráfica no descuenta estas unidades: se sumarán al stock cuando se registre la recepción en el Registro de pedidos.
+            </div>
+          </Card>
+        )}
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 16 }}>
+          <Card style={{ borderLeft: `4px solid ${C.yellow}` }}>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", color: C.yellow, fontWeight: 700, fontSize: 13, marginBottom: 8 }}><Truck size={16} /> Pedir a laboratorio</div>
+            {linea(det.cruceLab, det.dLab, det.med.max)}
+          </Card>
+          <Card style={{ borderLeft: `4px solid ${C.red}` }}>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", color: C.red, fontWeight: 700, fontSize: 13, marginBottom: 8 }}><Siren size={16} /> Pedido urgente a COFARTE</div>
+            {linea(det.cruceCofarte, det.dCof, det.med.min)}
+          </Card>
+        </div>
+
+        <Card style={{ marginBottom: 16 }}>
+          {det.sinDatos ? (
+            <div style={{ background: C.yellowBg, border: `1px solid ${C.yellow}`, color: "#854d0e", borderRadius: 10, padding: "8px 12px", fontSize: 12.5, display: "flex", gap: 7, alignItems: "center" }}>
+              <AlertTriangle size={15} /> No hay inventarios de este medicamento en los últimos 2 meses. Introduce el stock actual abajo para calcular la previsión.
+            </div>
+          ) : (<>
+            {det.pocosDatos && (
+              <div style={{ background: C.yellowBg, border: `1px solid ${C.yellow}`, color: "#854d0e", borderRadius: 10, padding: "8px 12px", marginBottom: 12, fontSize: 12.5, display: "flex", gap: 7, alignItems: "center" }}>
+                <AlertTriangle size={15} /> Menos de dos inventarios de este medicamento en los últimos 2 meses: la previsión se calcula desde el único recuento disponible.
+              </div>
+            )}
+            <Grafica p={det} />
+          </>)}
+        </Card>
+
+        <Card style={{ display: "flex", gap: 18, alignItems: "flex-end", flexWrap: "wrap" }}>
+          <div style={{ width: 230 }}>
+            <Field label="Corregir el stock actual (uds)">
+              <input style={inputStyle} value={stockManual[det.med.codigoV] ?? ""} placeholder={det.historico.length ? String(Math.round(det.historico[det.historico.length - 1].stock)) : "—"}
+                onChange={(e) => setStockManual({ ...stockManual, [det.med.codigoV]: e.target.value.replace(/[^\d]/g, "") })} inputMode="numeric" />
+            </Field>
+          </div>
+          <div style={{ fontSize: 12, color: C.sub, flex: 1, minWidth: 260, paddingBottom: 9 }}>
+            Por defecto se usa el último recuento físico guardado. Si has movido stock desde entonces, corrígelo aquí y la previsión se recalcula.
+          </div>
+        </Card>
+      </PrevMarco>
+    );
+  }
+
+  /* PANTALLA 2 · LISTA */
+  const vista = previsiones.filter((p) => grupo === "TODOS" || p.med.grupo === grupo);
+  const cuenta = (u) => previsiones.filter((p) => p.urgencia === u).length;
+
+  return (
+    <PrevMarco>
+      {avisos.length > 0 && (
+        <Card style={{ marginBottom: 14, borderLeft: `4px solid ${avisos.some((a) => a.nivel === "crit") ? C.red : C.yellow}` }}>
+          <div style={{ fontWeight: 700, color: C.text, display: "flex", gap: 8, alignItems: "center" }}>
+            <BellRing size={17} color={avisos.some((a) => a.nivel === "crit") ? C.red : C.yellow} />
+            Hay que pedir {avisos.length} {avisos.length === 1 ? "estupefaciente" : "estupefacientes"}
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(300px,1fr))", gap: 8, marginTop: 10 }}>
+            {avisos.map((a) => (
+              <div key={a.codigoV} style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: "8px 11px", background: a.nivel === "crit" ? C.redBg : C.yellowBg }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{a.nombre}</div>
+                <div style={{ fontSize: 12, color: C.sub, marginTop: 2 }}>
+                  <span style={{ fontFamily: "monospace" }}>{a.codigoV}</span> · {a.accion} · {a.dias === 0 ? "hoy" : `en ${a.dias} días`} ({fmtLarga(a.fecha)})
+                </div>
+                <div style={{ fontSize: 11.5, color: C.sub, marginTop: 2 }}>stock {a.stock} uds · umbral {a.umbral}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{ fontSize: 11.5, color: C.sub, marginTop: 9 }}>
+            No se avisa de los que ya tienen pedido en curso registrado en el Registro de pedidos.
+          </div>
+        </Card>
+      )}
+
+      <Card style={{ marginBottom: 16, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+        <GroupFilter3 value={grupo} onChange={setGrupo} />
+        <Badge level="crit">{cuenta("crit")} pedir en menos de 3 días</Badge>
+        <Badge level="warn">{cuenta("warn")} pedir en menos de 15 días</Badge>
+        <Badge level="ok">{cuenta("ok")} sin urgencia</Badge>
+        <Badge level="info">{cuenta("pedido")} con pedido en curso</Badge>
+        <span style={{ fontSize: 12, color: C.sub, marginLeft: "auto" }}>{fuente}</span>
+        <button style={btnGhost} onClick={() => setPantalla("revision")}><RefreshCw size={15} /> Revisar consumos</button>
+      </Card>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(310px,1fr))", gap: 14 }}>
+        {vista.map((p) => (
+          <button key={p.med.codigoV} onClick={() => setDetalle(p.med.codigoV)} style={{
+            textAlign: "left", background: C.card, border: `1px solid ${C.border}`, borderLeft: `4px solid ${COLOR_URGENCIA[p.urgencia]}`,
+            borderRadius: 14, padding: 16, cursor: "pointer", display: "flex", flexDirection: "column", gap: 10,
+          }}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "flex-start" }}>
+              <div>
+                <div style={{ fontWeight: 700, color: C.text, fontSize: 14, lineHeight: 1.25 }}>{p.med.nombre}</div>
+                <div style={{ fontFamily: "monospace", fontSize: 11, color: C.sub, marginTop: 3 }}>{p.med.codigoV}</div>
+              </div>
+              {p.med.grupo === "ORAL" ? <Pill size={16} color={C.sub} /> : <Syringe size={16} color={C.sub} />}
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", gap: 10 }}>
+              <div>
+                <div style={{ fontSize: 22, fontWeight: 800, color: C.text }}>{p.sinDatos ? "—" : Math.round(p.stockActual)}<span style={{ fontSize: 12, fontWeight: 600, color: C.sub }}> uds</span></div>
+                <div style={{ fontSize: 11, color: C.sub }}>−{p.consumoSemanal.toFixed(1)}/semana</div>
+              </div>
+              <Mini p={p} />
+            </div>
+            <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: 9, display: "flex", flexDirection: "column", gap: 5 }}>
+              {p.urgencia === "pedido" && <div style={{ marginBottom: 3 }}><Badge level="ok">Pedido en curso · {p.udsEnCurso} uds</Badge></div>}
+              {!p.tieneUmbrales ? <Badge level="none">Sin umbrales en catálogo</Badge>
+                : p.sinDatos ? <Badge level="none">Sin inventarios en 2 meses</Badge> : <>
+                <PrevFila color={C.yellow} icono={<Truck size={13} />} etiqueta="Laboratorio"
+                  valor={p.cruceLab.yaPasado ? "pedir ya" : `${fmtLarga(p.cruceLab.fecha)} · ${p.dLab} d`} />
+                <PrevFila color={C.red} icono={<Siren size={13} />} etiqueta="COFARTE"
+                  valor={p.cruceCofarte.yaPasado ? "pedir ya" : `${fmtLarga(p.cruceCofarte.fecha)} · ${p.dCof} d`} />
+              </>}
+              {p.pocosDatos && !p.sinDatos && <div style={{ fontSize: 11, color: C.sub, fontStyle: "italic" }}>menos de 2 inventarios — proyección desde 1 punto</div>}
+            </div>
+          </button>
+        ))}
+      </div>
+
+      {sinConsumo.length > 0 && (
+        <Card style={{ marginTop: 14, padding: 14 }}>
+          <div style={{ fontWeight: 700, color: C.sub, fontSize: 12.5, display: "flex", gap: 7, alignItems: "center" }}>
+            <Info size={14} /> Sin consumo registrado — quedan fuera de la previsión ({sinConsumo.length})
+          </div>
+          <ul style={{ margin: "7px 0 0", paddingLeft: 20, fontSize: 12.5, color: C.text, columns: 2, columnGap: 24 }}>
+            {sinConsumo.map((m) => (
+              <li key={m.codigoV} style={{ breakInside: "avoid" }}>{m.nombre} — <b style={{ fontFamily: "monospace" }}>{m.codigoV}</b></li>
+            ))}
+          </ul>
+          <button style={{ ...btnGhost, marginTop: 10, fontSize: 13 }} onClick={() => { setSoloConConsumo(false); setPantalla("revision"); }}>Añadir consumos</button>
+        </Card>
+      )}
+    </PrevMarco>
+  );
+}
+
 const NAV = [
   ["inicio", "Inicio", Home],
   ["inventario", "Inventario semanal", ClipboardList],
   ["anteriores", "Inventarios anteriores", History],
+  ["prevision", "Previsión", TrendingDown],
   ["detector", "Detector de alertas", ShieldAlert],
   ["alertas", "Alertas", Bell],
   ["pedidos", "Registro de pedidos", PackageSearch],
@@ -2272,6 +3002,7 @@ export default function App() {
   const [pedidos, setPedidos] = useState(() => lsGet(LS.data("Pedidos"), []));
   const [caducados, setCaducados] = useState(() => lsGet(LS.data("Caducados"), []));
   const [incidencias, setIncidencias] = useState(() => lsGet(LS.data("Incidencias"), []));
+  const [consumos, setConsumos] = useState(() => lsGet(LS.data("Consumos"), [])); // Previsión (F7)
   const [meds, setMeds] = useState(() => lsGet(LS.data("Catalogo"), ALL_MEDS));
   const [alertas, setAlertas] = useState(() => lsGet(LS.data("Alertas"), []));
   const [config, setConfig] = useState(() => mergeConfig(lsGet(LS.data("Config"), null))); // niveles de descuadre/alerta (#5/#6/#22)
@@ -2285,6 +3016,16 @@ export default function App() {
   const medByV = useMemo(() => Object.fromEntries(meds.map((m) => [m.codigoV, m])), [meds]);
   const cnMap = useMemo(() => Object.fromEntries(cnCatalogo.map((e) => [String(e.cn), e])), [cnCatalogo]);
 
+  // Previsión (F7): los avisos «hay que pedir» se calculan al cargar, con los consumos
+  // guardados + inventarios + pedidos ya en memoria, para que Inicio los muestre sin abrir
+  // la pestaña. Usa el catálogo del módulo (ALL_MEDS), la misma fuente que Previsión.
+  const avisosPrevision = useMemo(() => {
+    const previsiones = ALL_MEDS
+      .map((m) => { const media = mediaConsumoValida(consumos, m.codigoV); return media != null ? preverMedicamento(m, media, { inventarios, pedidos }) : null; })
+      .filter(Boolean);
+    return construirAvisos(previsiones);
+  }, [consumos, inventarios, pedidos]);
+
   const notify = (msg, tone = "ok") => { setToast({ msg, tone }); setTimeout(() => setToast(null), 3200); };
 
   // Persistir cada dataset en localStorage cuando cambie
@@ -2292,6 +3033,7 @@ export default function App() {
   useEffect(() => { lsSet(LS.data("Pedidos"), pedidos); }, [pedidos]);
   useEffect(() => { lsSet(LS.data("Caducados"), caducados); }, [caducados]);
   useEffect(() => { lsSet(LS.data("Incidencias"), incidencias); }, [incidencias]);
+  useEffect(() => { lsSet(LS.data("Consumos"), consumos); }, [consumos]);
   useEffect(() => { lsSet(LS.data("Catalogo"), meds); }, [meds]);
   useEffect(() => { lsSet(LS.data("Alertas"), alertas); }, [alertas]);
   useEffect(() => { lsSet(LS.data("Config"), config); }, [config]);
@@ -2335,6 +3077,10 @@ export default function App() {
         const ale = await api.list("Alertas");
         if (ale && ale.rows) setAlertas(ale.rows);
       } catch (e3) { /* backend sin hoja Alertas: se mantienen las locales */ }
+      try {
+        const con = await api.list("Consumos");
+        if (con && con.rows) setConsumos(con.rows);
+      } catch (e4) { /* backend sin hoja Consumos (aún sin desplegar): se mantienen los locales */ }
       notify("Datos cargados desde Google Sheets");
     } catch (e) { notify("Sin conexión a Sheets — trabajando en local", "warn"); }
     setSyncing(false);
@@ -2490,6 +3236,22 @@ export default function App() {
   const crearIncidencia = async (i) => { setIncidencias((prev) => [i, ...prev]); await enqueue({ action: "append", sheet: "Incidencias", row: i }); notify("Incidencia registrada" + pendSuffix()); };
   const actualizarIncidencia = async (i) => { setIncidencias((prev) => prev.map((x) => x.id === i.id ? i : x)); await enqueue({ action: "update", sheet: "Incidencias", id: i.id, row: i }); notify("Incidencia actualizada" + pendSuffix()); };
 
+  // Previsión (F7): guarda un valor de consumo por Código V (estado actual, no histórico).
+  // Upsert: si ya existe fila para ese codigoV se actualiza, si no se añade. Un valor por CV.
+  const guardarConsumos = async (filas) => {
+    const anteriores = consumos;
+    const next = (filas || []).map((f) => {
+      const existente = anteriores.find((c) => c.codigoV === f.codigoV);
+      return { id: existente ? existente.id : uid(), codigoV: f.codigoV, media: f.media, origen: f.origen, fechaCarga: f.fechaCarga };
+    });
+    setConsumos(next);
+    for (const row of next) {
+      const existia = anteriores.some((c) => c.codigoV === row.codigoV);
+      await enqueue(existia ? { action: "update", sheet: "Consumos", id: row.id, row } : { action: "append", sheet: "Consumos", row });
+    }
+    notify("Consumos guardados" + pendSuffix());
+  };
+
   // Resumen ligero del último análisis del Detector (solo recuento, sin checklist)
   const registrarResumenAlertas = (r) => { setResumenAlertas(r); if (r.criticas > 0) notify(`Detector: ${r.criticas} alertas críticas en el último análisis`, "warn"); };
   // Guarda la tabla completa del cruce en la pestaña "Cruces" (por lotes, vía cola offline-first)
@@ -2566,9 +3328,10 @@ export default function App() {
             <CloudOff size={16} /> Modo local: los datos se guardan en este equipo y se sincronizarán con Google Sheets al configurar la URL del Web App (botón «Configurar Sheets»).
           </div>
         )}
-        {view === "inicio" && <Inicio inventarios={inventarios} incidencias={incidencias} alertas={alertas} resumenAlertas={resumenAlertas} medByV={medByV} config={config} goTo={setView} />}
+        {view === "inicio" && <Inicio inventarios={inventarios} incidencias={incidencias} alertas={alertas} resumenAlertas={resumenAlertas} medByV={medByV} config={config} goTo={setView} avisosPrevision={avisosPrevision} hayConsumos={consumos.length > 0} />}
         {view === "inventario" && <InventarioSemanal onSaved={guardarInventario} avisos={avisosRepo} meds={meds} medByV={medByV} config={config} />}
         {view === "anteriores" && <InventariosAnteriores inventarios={inventarios} config={config} medByV={medByV} pedidos={pedidos} onEdit={guardarEdicionInventario} onCrearIncidencia={crearIncidenciaDesdeDescuadre} />}
+        {view === "prevision" && <Prevision inventarios={inventarios} pedidos={pedidos} consumosGuardados={consumos} onGuardarConsumos={guardarConsumos} />}
         {view === "detector" && <DetectorAlertas onResumen={registrarResumenAlertas} onGuardarCruce={guardarCruce} sheetsConnected={connected} onNombrePaciente={() => notify("⚠️ Posible nombre de paciente detectado y excluido del procesamiento", "crit")} medByV={medByV} />}
         {view === "alertas" && <AlertasView alertas={alertas} onEstado={marcarAlerta} onPedir={pedirDesdeAlerta} />}
         {view === "pedidos" && <RegistroPedidos pedidos={pedidos} onCreate={crearPedido} onUpdate={actualizarPedido} meds={meds} cnMap={cnMap} cnCatalogo={cnCatalogo} prefill={pedidoPrefill} clearPrefill={() => setPedidoPrefill(null)} />}
