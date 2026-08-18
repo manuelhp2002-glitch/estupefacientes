@@ -238,6 +238,22 @@ function extraerCodigoV(txt) {
   const m = String(txt).match(/([VYT]\d{5})/i);
   return m ? m[1].toUpperCase() : null;
 }
+// Entrada del catálogo CN (cn + proveedor) para un Código V —o el string compuesto
+// "V00655 · NOMBRE"—, o null. Reutiliza extraerCodigoV para tolerar el compuesto. Un
+// mismo Código V puede tener varios CN (marcas/proveedores): se toma el último registrado,
+// mismo criterio que la selección manual del estupefaciente. El CN queda editable a mano.
+function cnCatEntryPorCodigoV(cnCatalogo, codigoVoTexto) {
+  const cv = extraerCodigoV(codigoVoTexto);
+  if (!cv) return null;
+  const cns = (cnCatalogo || []).filter((x) => String(x.codigoV) === cv);
+  return cns.length ? cns[cns.length - 1] : null;
+}
+// CN del catálogo para un Código V (o null). Único origen de verdad del CN, usado tanto
+// por la selección manual como por el prefill programático desde un aviso de reposición.
+function cnPorCodigoV(cnCatalogo, codigoVoTexto) {
+  const e = cnCatEntryPorCodigoV(cnCatalogo, codigoVoTexto);
+  return e ? e.cn : null;
+}
 // nivel de descuadre -> color (versión antigua uniforme; se conserva por compatibilidad)
 function discColor(v) {
   const a = Math.abs(Number(v) || 0);
@@ -1214,7 +1230,18 @@ function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, cnMap, cnCatalogo,
   const [sort, setSort] = useState({ key: "vale", dir: "desc" }); // por defecto: vale más alto arriba (#2/#20)
 
   // Abre "Nuevo pedido": siembra la fecha de hoy y el siguiente nº de vale (editable) (#7)
-  const abrirNuevo = (base) => { setErr(""); setF({ fechaPedido: todayISO(), vale: nextVale(pedidos), ...(base || {}) }); setOpenNew(true); };
+  const abrirNuevo = (base) => {
+    setErr("");
+    const seed = { fechaPedido: todayISO(), vale: nextVale(pedidos), ...(base || {}) };
+    // Prefill desde un aviso de reposición: trae el estupefaciente pero no el CN. Se resuelve
+    // por el mismo origen de verdad que la selección manual, para que el CN no quede vacío.
+    if (seed.estupefaciente && !seed.cn) {
+      const hit = cnCatEntryPorCodigoV(cnCatalogo, seed.estupefaciente);
+      if (hit) { seed.cn = hit.cn; if (!seed.proveedor && hit.proveedor) seed.proveedor = hit.proveedor; }
+    }
+    setF(seed);
+    setOpenNew(true);
+  };
   // Abre el mismo formulario para EDITAR un pedido existente: todos los campos, en cualquier momento (#1)
   const abrirEditar = (p) => { setErr(""); setF({ ...p }); setOpenNew(true); };
   // Al escribir el CN a mano, autocompleta medicamento y proveedor si existe (#8). Editable.
@@ -1227,11 +1254,9 @@ function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, cnMap, cnCatalogo,
   };
   // Al ELEGIR el estupefaciente, pone su CN (el último si hay varios) y el proveedor (#8). Editable.
   const setEstupefaciente = (val) => {
-    const cv = (String(val).match(/([VYT]\d{5})/) || [])[1] || "";
-    const cns = cv ? (cnCatalogo || []).filter((x) => String(x.codigoV) === cv) : [];
-    if (cns.length) {
-      const ult = cns[cns.length - 1];
-      setF((prev) => ({ ...prev, estupefaciente: val, cn: ult.cn, proveedor: ult.proveedor || prev.proveedor }));
+    const hit = cnCatEntryPorCodigoV(cnCatalogo, val);
+    if (hit) {
+      setF((prev) => ({ ...prev, estupefaciente: val, cn: hit.cn, proveedor: hit.proveedor || prev.proveedor }));
     } else { setF((prev) => ({ ...prev, estupefaciente: val, cn: "" })); }
   };
   const elegirCn = (e) => setF((prev) => ({ ...prev, cn: e.cn, proveedor: e.proveedor || prev.proveedor }));
@@ -1377,6 +1402,8 @@ function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, cnMap, cnCatalogo,
                 ))}
               </div>
             </div>
+          ) : codigoVSel && !cnPorCodigoV(cnCatalogo, f.estupefaciente) ? (
+            <div style={{ marginTop: 6 }}><Badge level="warn">Sin CN en catálogo — introducir manualmente</Badge></div>
           ) : (cnsForV.length === 1 && f.cn && <div style={{ color: C.green, fontSize: 12, marginTop: 5 }}>✓ CN y proveedor puestos automáticamente</div>)}
         </Field>
         <Field label="Fecha de pedido"><input type="date" style={reqStyle(!f.fechaPedido)} value={f.fechaPedido || todayISO()} onChange={(e) => setF({ ...f, fechaPedido: e.target.value })} /></Field>
