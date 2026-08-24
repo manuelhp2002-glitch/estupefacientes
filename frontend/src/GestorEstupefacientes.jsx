@@ -443,6 +443,20 @@ async function outboxFlush(api) {
       ops.shift(); outboxWrite(ops);
     } catch (e) {
       if (esErrorDeRed(e)) break; // se reintentará al recuperar conexión, sin perder el orden
+      // Compatibilidad con el backend AÚN NO redesplegado (sin upsert): un update sobre
+      // una fila que todavía no existe en Sheets (creada en otro equipo, o cuyo append no
+      // ha llegado) lanza "No existe el id". Se reintenta como append —idempotente— que la
+      // crea con el estado correcto. Así el fallo #4 queda resuelto SIN tocar Apps Script.
+      if (op.action === "update" && op.id != null && op.row && /no existe el id/i.test(String((e && e.message) || ""))) {
+        try {
+          await api.append(op.sheet, { ...op.row, id: op.id });
+          ops.shift(); outboxWrite(ops);
+          continue;
+        } catch (e2) {
+          if (esErrorDeRed(e2)) break;
+          e = e2; // el append también falló por aplicación → cae al conteo de intentos
+        }
+      }
       op.intentos = (op.intentos || 0) + 1;
       op.ultimoError = String((e && e.message) || e || "error");
       ops.shift();
