@@ -365,6 +365,8 @@ function makeApi(getUrl) {
 const LS = {
   url: "estupefarma.appsScriptUrl",
   outbox: "estupefarma.outbox",
+  outboxFailed: "estupefarma.outboxFailed",
+  ultimaSync: "estupefarma.ultimaSync",
   data: (sheet) => `estupefarma.data.${sheet}`,
 };
 function lsGet(key, fallback) {
@@ -401,14 +403,36 @@ function useIsMobile(bp = 860) {
   return m;
 }
 
-// Cola de escrituras pendientes (outbox)
+// Cola de escrituras pendientes (outbox) + cola de fallidas (errores de aplicación
+// tras varios intentos). Una operación defectuosa NO puede detener toda la cola: eso
+// dejaba escrituras invisibles para el otro usuario (fallos #1 y #4 de la auditoría).
 function outboxRead() { return lsGet(LS.outbox, []); }
 function outboxWrite(ops) { lsSet(LS.outbox, ops); }
-function outboxAdd(op) { const ops = outboxRead(); ops.push({ opId: uid(), ts: Date.now(), ...op }); outboxWrite(ops); return ops.length; }
-// Vuelca la cola en orden FIFO. Ante error de red se detiene y conserva el resto.
+function outboxAdd(op) { const ops = outboxRead(); ops.push({ opId: uid(), ts: Date.now(), ...op, intentos: 0 }); outboxWrite(ops); return ops.length; }
+function outboxFailedRead() { return lsGet(LS.outboxFailed, []); }
+function outboxFailedWrite(ops) { lsSet(LS.outboxFailed, ops); }
+
+// Distingue un error transitorio de red/servidor (reintentable, hay que conservar el
+// orden) de un error de aplicación (la operación es defectuosa; reintentarla en bucle
+// bloquearía el resto de la cola). offline / fetch rechazado / http-5xx = red.
+function esErrorDeRed(e) {
+  if (isOffline()) return true;
+  if (e instanceof TypeError) return true; // fetch rechazado (sin respuesta del servidor)
+  const m = String((e && e.message) || e || "");
+  if (m === "no-url") return true;
+  if (/^http-5\d\d$/.test(m)) return true;
+  if (/Failed to fetch|NetworkError|Load failed|ERR_NETWORK|timed? ?out/i.test(m)) return true;
+  return false; // http-4xx o { error } del backend → error de aplicación
+}
+
+// Vuelca la cola en orden FIFO. Error de red → se detiene y conserva el resto (reintento
+// posterior). Error de aplicación → cuenta intentos; a los 3 la aparta a la cola de
+// fallidas y CONTINÚA con el resto (nunca en silencio: se muestra en la barra y en Ajustes).
 async function outboxFlush(api) {
   if (!api.connected() || isOffline()) return outboxRead().length;
   let ops = outboxRead();
+  // Termina siempre: cada vuelta o bien vacía la cabeza (éxito / a fallidas), o bien
+  // reencola con intentos+1 (tope 3 → a fallidas). Nunca es un bucle infinito.
   while (ops.length) {
     const op = ops[0];
     try {
@@ -417,9 +441,28 @@ async function outboxFlush(api) {
       else if (op.action === "update") await api.update(op.sheet, op.id, op.row);
       else if (op.action === "remove") await api.remove(op.sheet, op.id);
       ops.shift(); outboxWrite(ops);
-    } catch (e) { break; } // se reintentará al recuperar conexión
+    } catch (e) {
+      if (esErrorDeRed(e)) break; // se reintentará al recuperar conexión, sin perder el orden
+      op.intentos = (op.intentos || 0) + 1;
+      op.ultimoError = String((e && e.message) || e || "error");
+      ops.shift();
+      if (op.intentos >= 3) {
+        outboxWrite(ops);
+        const fail = outboxFailedRead(); fail.push({ ...op, fallidaTs: Date.now() }); outboxFailedWrite(fail);
+      } else {
+        ops.push(op); outboxWrite(ops); // al final: intenta el resto antes de reintentarla
+      }
+    }
   }
   return outboxRead().length;
+}
+// Devuelve las operaciones fallidas a la cola (intentos a 0) para reintentarlas.
+function outboxRetryFailed() {
+  const fail = outboxFailedRead(); if (!fail.length) return outboxRead().length;
+  const ops = outboxRead();
+  fail.forEach((f) => { const { fallidaTs, ultimoError, ...op } = f; ops.push({ ...op, intentos: 0 }); });
+  outboxWrite(ops); outboxFailedWrite([]);
+  return ops.length;
 }
 
 // Normaliza una fila de la hoja "Catalogo" al shape de medicamento usado por la app
@@ -2996,6 +3039,7 @@ export default function App() {
   const [toast, setToast] = useState(null);
   const [syncing, setSyncing] = useState(false);
   const [pendientes, setPendientes] = useState(() => outboxRead().length);
+  const [fallidas, setFallidas] = useState(() => outboxFailedRead());
 
   // Estados de datos — inicializados desde localStorage (sobreviven a recarga / sin red)
   const [inventarios, setInventarios] = useState(() => lsGet(LS.data("Inventarios"), []));
@@ -3041,7 +3085,16 @@ export default function App() {
   useEffect(() => { lsSet(LS.data("Declaraciones"), declaraciones); }, [declaraciones]);
 
   // Vuelca la cola de escrituras pendientes al backend (idempotente por id)
-  const flush = async () => { const restantes = await outboxFlush(api); setPendientes(restantes); return restantes; };
+  const flush = async () => { const restantes = await outboxFlush(api); setPendientes(restantes); setFallidas(outboxFailedRead()); return restantes; };
+
+  // Reintentar las escrituras fallidas (las devuelve a la cola con intentos = 0)
+  const reintentarFallidas = async () => { const n = outboxRetryFailed(); setPendientes(n); setFallidas(outboxFailedRead()); const r = await flush(); notify(r === 0 ? "Reintento completado — sincronizado" : `Reintento en curso (${r} pendiente${r === 1 ? "" : "s"})`, r === 0 ? "ok" : "warn"); };
+  // Descartar definitivamente las escrituras fallidas (con confirmación: se pierden)
+  const descartarFallidas = () => {
+    if (!outboxFailedRead().length) return;
+    if (!window.confirm("Vas a DESCARTAR los cambios que no se pudieron sincronizar. Se perderán de forma permanente y NO llegarán a Google Sheets. ¿Continuar?")) return;
+    outboxFailedWrite([]); setFallidas([]); notify("Cambios fallidos descartados", "warn");
+  };
 
   // Carga desde Sheets (incluye el catálogo de medicamentos de la hoja "Catalogo")
   const cargar = async () => {
@@ -3106,20 +3159,25 @@ export default function App() {
   };
   const pedirDesdeAlerta = (a) => { setPedidoPrefill({ estupefaciente: `${a.codigoV} · ${a.medicamento}`, _alertaId: a.id }); setView("pedidos"); };
 
+  // Sufijo honesto para los toasts de guardado (#1.4): el mensaje refleja el resultado real.
+  const guardadoSuffix = (okRemoto) => okRemoto ? " y sincronizado" : " en este equipo — NO sincronizado";
+
   // Guardar configuración (#6). Se guarda ya en este equipo (localStorage) y, además,
   // compartida en Google Sheets: en una fila especial de la hoja "Catalogo" (id
   // "__config__"), que la app ya tiene permitida — así no hace falta hoja nueva ni
   // redesplegar el backend. Best-effort: si no hay conexión, queda solo en local.
   const guardarConfig = async (nuevo) => {
     setConfig(nuevo);
+    let okRemoto = false;
     try {
       if (api.connected() && !isOffline()) {
         const row = { id: "__config__", codigoV: "(config)", nombre: "Ajustes de la app — no editar a mano", grupo: "", json: JSON.stringify(nuevo) };
         await api.append("Catalogo", row);            // crea la fila si no existe (idempotente)
         await api.update("Catalogo", "__config__", row); // asegura el valor actual
+        okRemoto = true;
       }
-    } catch (e) { /* sin conexión: la config queda guardada en este equipo */ }
-    notify("Configuración guardada" + ((!api.connected() || isOffline()) ? " (en este equipo)" : ""));
+    } catch (e) { /* sin conexión / error: la config queda guardada en este equipo */ }
+    notify("Configuración guardada" + guardadoSuffix(okRemoto), okRemoto ? "ok" : "warn");
   };
 
   // Guardar los niveles de pedido (máx/mín por medicamento, #6): local + escribe en el Sheet
@@ -3127,30 +3185,35 @@ export default function App() {
   const guardarNiveles = async (medsNuevos) => {
     const prev = meds;
     setMeds(medsNuevos);
-    let escritos = 0;
+    let cambios = 0, escritos = 0, okRemoto = true;
+    const conectado = api.connected() && !isOffline();
     try {
-      if (api.connected() && !isOffline()) {
-        for (const m of medsNuevos) {
-          const antes = prev.find((x) => x.codigoV === m.codigoV);
-          const cambiado = !antes || String(antes.min ?? "") !== String(m.min ?? "") || String(antes.max ?? "") !== String(m.max ?? "");
-          if (cambiado && m.id) { await api.update("Catalogo", m.id, { id: m.id, codigoV: m.codigoV, nombre: m.nombre, grupo: m.grupo, min: m.min, max: m.max }); escritos++; }
-        }
+      for (const m of medsNuevos) {
+        const antes = prev.find((x) => x.codigoV === m.codigoV);
+        const cambiado = !antes || String(antes.min ?? "") !== String(m.min ?? "") || String(antes.max ?? "") !== String(m.max ?? "");
+        if (!cambiado) continue;
+        cambios++;
+        if (conectado && m.id) { await api.update("Catalogo", m.id, { id: m.id, codigoV: m.codigoV, nombre: m.nombre, grupo: m.grupo, min: m.min, max: m.max }); escritos++; }
       }
-    } catch (e) { /* sin conexión: queda guardado en este equipo */ }
-    notify("Niveles de pedido guardados" + ((!api.connected() || isOffline()) ? " (en este equipo)" : ""));
+    } catch (e) { okRemoto = false; /* sin conexión: queda guardado en este equipo */ }
+    // Toast honesto: refleja lo realmente escrito (fallo #2 — la escritura real se corrige en la Fase 3).
+    const sincronizados = conectado && okRemoto && escritos === cambios;
+    notify(`Niveles de pedido guardados (${cambios} cambio${cambios === 1 ? "" : "s"})` + guardadoSuffix(sincronizados), sincronizados || cambios === 0 ? "ok" : "warn");
   };
 
   // Guardar el catálogo CN editado (#8/#15): local + fila "__cncatalog__" de Catalogo (compartido).
   const guardarCnCatalogo = async (nuevo) => {
     setCnCatalogo(nuevo);
+    let okRemoto = false;
     try {
       if (api.connected() && !isOffline()) {
         const row = { id: "__cncatalog__", codigoV: "(cn)", nombre: "Base de datos CN — no editar a mano", grupo: "", json: JSON.stringify(nuevo) };
         await api.append("Catalogo", row);
         await api.update("Catalogo", "__cncatalog__", row);
+        okRemoto = true;
       }
-    } catch (e) { /* sin conexión: queda guardado en este equipo */ }
-    notify("Lista de CN guardada" + ((!api.connected() || isOffline()) ? " (en este equipo)" : ""));
+    } catch (e) { /* sin conexión / error: queda guardado en este equipo */ }
+    notify("Lista de CN guardada" + guardadoSuffix(okRemoto), okRemoto ? "ok" : "warn");
   };
 
   // Sufijo de aviso cuando la escritura queda pendiente de sincronizar
@@ -3213,19 +3276,22 @@ export default function App() {
   // Declaraciones de caducados (#14): guardar (local + fila "__declaraciones__" de Catalogo, compartido)
   const guardarDeclaraciones = async (nuevo) => {
     setDeclaraciones(nuevo);
+    let okRemoto = false;
     try {
       if (api.connected() && !isOffline()) {
         const row = { id: "__declaraciones__", codigoV: "(dec)", nombre: "Declaraciones de caducados — no editar a mano", grupo: "", json: JSON.stringify(nuevo) };
         await api.append("Catalogo", row);
         await api.update("Catalogo", "__declaraciones__", row);
+        okRemoto = true;
       }
-    } catch (e) { /* sin conexión: queda en este equipo */ }
+    } catch (e) { /* sin conexión / error: queda en este equipo */ }
+    return okRemoto;
   };
   // Cerrar la declaración actual y empezar una nueva vacía; devuelve el id de la nueva
   const nuevaDeclaracion = async (nombre) => {
     const id = "dec_" + uid();
-    await guardarDeclaraciones({ actualId: id, lista: [...declaraciones.lista, { id, nombre: String(nombre || "Declaración").trim(), creada: Date.now() }] });
-    notify(`Nueva declaración creada: ${nombre}` + pendSuffix());
+    const okRemoto = await guardarDeclaraciones({ actualId: id, lista: [...declaraciones.lista, { id, nombre: String(nombre || "Declaración").trim(), creada: Date.now() }] });
+    notify(`Nueva declaración creada: ${nombre}` + guardadoSuffix(okRemoto), okRemoto ? "ok" : "warn");
     return id;
   };
 
@@ -3317,6 +3383,11 @@ export default function App() {
               <RefreshCw size={12} /> {pendientes} cambio{pendientes > 1 ? "s" : ""} sin sincronizar
             </div>
           )}
+          {fallidas.length > 0 && (
+            <button onClick={() => setOpenSettings(true)} style={{ marginTop: 8, width: "100%", fontSize: 11.5, fontWeight: 700, color: "#fff", background: C.red, border: "none", borderRadius: 8, padding: "7px 8px", cursor: "pointer", display: "flex", gap: 6, alignItems: "center", justifyContent: "center" }}>
+              <AlertTriangle size={13} /> {fallidas.length} cambio{fallidas.length > 1 ? "s" : ""} NO sincronizado{fallidas.length > 1 ? "s" : ""}
+            </button>
+          )}
         </div>
       </aside>
       )}
@@ -3345,7 +3416,26 @@ export default function App() {
         footer={<><button style={btnGhost} onClick={() => setOpenSettings(false)}>Cerrar</button><button style={btnPrimary} onClick={async () => { const u = (url || "").trim(); if (u) lsSet(LS.url, u); else lsDel(LS.url); setUrl(u); setOpenSettings(false); await cargar(); }}><RefreshCw size={15} /> Guardar y sincronizar</button></>}>
         <p style={{ fontSize: 13, color: C.sub, marginTop: 0 }}>Pega la URL del <b>Web App</b> generada al desplegar el Apps Script (<code>Code.gs</code>). Se guarda en este equipo, así que <b>no hay que volver a introducirla</b>. Cada funcionalidad se guarda en su propia pestaña del Google Sheets.</p>
         <Field label="URL del Web App (…/exec)"><input style={inputStyle} value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://script.google.com/macros/s/…/exec" /></Field>
-        <div style={{ marginTop: 12, fontSize: 12, color: C.sub }}>Estado: {connected ? <Badge level="ok">Conectado</Badge> : <Badge level="warn">Modo local</Badge>} {syncing && "· sincronizando…"} {pendientes > 0 && <Badge level="warn">{pendientes} sin sincronizar</Badge>}</div>
+        <div style={{ marginTop: 12, fontSize: 12, color: C.sub, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>Estado: {connected ? <Badge level="ok">Conectado</Badge> : <Badge level="warn">Modo local</Badge>} {syncing && "· sincronizando…"} {pendientes > 0 && <Badge level="warn">{pendientes} sin sincronizar</Badge>} {fallidas.length > 0 && <Badge level="crit">{fallidas.length} NO sincronizado{fallidas.length > 1 ? "s" : ""}</Badge>}</div>
+
+        {fallidas.length > 0 && (
+          <div style={{ marginTop: 16, border: `1px solid ${C.red}`, background: C.redBg, borderRadius: 10, padding: 12 }}>
+            <div style={{ fontWeight: 700, color: C.red, fontSize: 13, display: "flex", gap: 6, alignItems: "center" }}><AlertTriangle size={15} /> {fallidas.length} cambio{fallidas.length > 1 ? "s" : ""} no sincronizado{fallidas.length > 1 ? "s" : ""}</div>
+            <div style={{ fontSize: 12, color: C.text, marginTop: 4 }}>Estas escrituras no llegaron a Google Sheets tras varios intentos. Revísalas y reinténtalas, o descártalas si ya no aplican.</div>
+            <div style={{ maxHeight: 180, overflowY: "auto", marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+              {fallidas.map((f) => (
+                <div key={f.opId} style={{ background: "#fff", border: `1px solid ${C.border}`, borderRadius: 8, padding: "7px 9px", fontSize: 11.5, color: C.text }}>
+                  <div style={{ fontWeight: 700 }}>{f.action} · {f.sheet}{f.id ? ` · ${f.id}` : ""}</div>
+                  <div style={{ color: C.sub, marginTop: 2 }}>{f.fallidaTs ? fmtDateTime(new Date(f.fallidaTs)) : ""}{f.ultimoError ? ` · ${f.ultimoError}` : ""}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+              <button style={btnPrimary} onClick={reintentarFallidas}><RefreshCw size={14} /> Reintentar todo</button>
+              <button style={{ ...btnGhost, color: C.red, borderColor: C.red }} onClick={descartarFallidas}>Descartar</button>
+            </div>
+          </div>
+        )}
         <div style={{ marginTop: 16, background: "#F3F4F6", borderRadius: 10, padding: 12, fontSize: 12, color: C.text }}>
           Pestañas: <b>Inventarios, Pedidos, Caducados, Incidencias, Cruces, Catalogo</b>. Ninguna almacena nombres de paciente. Si defines <code>VITE_APPS_SCRIPT_URL</code> en Vercel, la URL viene ya configurada por defecto.
         </div>

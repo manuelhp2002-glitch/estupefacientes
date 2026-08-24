@@ -184,7 +184,20 @@ function updateRow_(name, id, row) {
   var s = getSheet_(name);
   var headers = ensureHeaders_(s, Object.keys(row || {}));
   var rowIdx = findRowIndexById_(s, headers, id);
-  if (rowIdx === -1) throw new Error("No existe el id " + id + " en " + name);
+  if (rowIdx === -1) {
+    // UPSERT: un update sobre una fila que aún no existe (alerta descartada antes de que
+    // llegara su append, o fila creada en otro equipo) NO debe reventar: bloquearía toda
+    // la cola FIFO del navegador. Si llega contenido, se inserta. El guard de privacidad
+    // se aplica igual porque appendRow_ lo vuelve a comprobar.
+    if (row && Object.keys(row).length) {
+      var ins = {};
+      for (var k in row) ins[k] = row[k];
+      ins.id = id;
+      appendRow_(name, ins);
+      return { ok: true, upserted: true };
+    }
+    throw new Error("No existe el id " + id + " en " + name);
+  }
   var current = s.getRange(rowIdx, 1, 1, headers.length).getValues()[0];
   var merged = headers.map(function (h, i) { return (row && row[h] != null) ? row[h] : current[i]; });
   s.getRange(rowIdx, 1, 1, headers.length).setValues([merged]);
