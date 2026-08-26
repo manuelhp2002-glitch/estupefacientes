@@ -841,19 +841,19 @@ function FichaMedicamento({ open, row, med, pedidos, config, onClose }) {
 }
 
 function InventariosAnteriores({ inventarios, config, medByV, pedidos, onEdit, onCrearIncidencia }) {
-  const fechas = useMemo(() => [...new Set(inventarios.map((r) => r.fecha))].sort().reverse(), [inventarios]);
-  const [sel, setSel] = useState(fechas[0] || "");
   const [grupo, setGrupo] = useState("ORAL");
+  const fechas = useMemo(() => [...new Set(inventarios.filter((r) => r.grupo === grupo).map((r) => r.fecha))].sort().reverse(), [inventarios, grupo]);
+  const [sel, setSel] = useState(fechas[0] || "");
   const [editando, setEditando] = useState(false);
   const [draft, setDraft] = useState({});
   const [saving, setSaving] = useState(false);
   const [ficha, setFicha] = useState(null); // fila cuyo medicamento se muestra en la ficha (F11)
   const nombreBtn = { background: "none", border: "none", padding: 0, margin: 0, font: "inherit", color: C.text, cursor: "pointer", textAlign: "left", textDecoration: "none" };
-  useEffect(() => { if (!sel && fechas[0]) setSel(fechas[0]); }, [fechas, sel]);
+  useEffect(() => { if (!fechas.includes(sel)) setSel(fechas[0] || ""); }, [fechas, sel]); // al cambiar de grupo, si la fecha ya no existe en ese grupo, salta a la más reciente
   useEffect(() => { setEditando(false); setDraft({}); }, [sel, grupo]); // salir de edición al cambiar de fecha/grupo
 
   const filas = inventarios.filter((r) => r.fecha === sel && r.grupo === grupo);
-  const descPorFecha = (f) => inventarios.filter((r) => r.fecha === f && hayDescuadre(r)).length;
+  const descPorFecha = (f) => inventarios.filter((r) => r.fecha === f && r.grupo === grupo && hayDescuadre(r)).length;
 
   const num = (v) => (v === "" || v == null ? 0 : Number(v));
   const val = (r, campo) => (editando && draft[r.id] != null ? draft[r.id][campo] : r[campo]); // valor efectivo (borrador si se edita)
