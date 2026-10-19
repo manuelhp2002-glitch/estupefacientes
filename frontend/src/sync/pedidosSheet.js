@@ -81,7 +81,8 @@ function mismaFecha(toDate, a, b) {
   return da.getFullYear() === db.getFullYear() && da.getMonth() === db.getMonth() && da.getDate() === db.getDate();
 }
 
-const CAMPOS_COMPARAR = ["fechaPedido", "udsPedidas", "fechaEntrada", "udsRecibidas", "proveedor", "farmaceutico", "incidencias", "noServido", "estado"];
+const CAMPOS_COMPARAR = ["fechaPedido", "udsPedidas", "fechaEntrada", "udsRecibidas", "proveedor", "farmaceutico", "incidencias", "noServido"];
+const RECEPCIONADO = ["Recibido", "Incidencia", "No servido"];
 
 // planSincronizacion(sheet, pedidosApp, cnCatalogo, catalogo, corteISO, { toDate, estadoPedido })
 //   sheet       = { headers:[...], rows:[[...],...] }  (getDisplayValues del Sheet)
@@ -188,24 +189,40 @@ export function planSincronizacion(sheet, pedidosApp, cnCatalogo, catalogo, cort
     const actual = pedidoPorVale[valeRaw.toLowerCase()];
     if (!actual) { add.push(destino); continue; }
 
+    // Regla de NO-RETROCESO: si la app ya tiene recepción (Recibido/Incidencia/No
+    // servido) y la fila del Sheet no la refleja (implicaría "Pendiente"), NO se
+    // sobrescribe: va a revisar (no corregible) para que una persona lo mire.
+    const estadoApp = estadoPedido(actual);
+    if (RECEPCIONADO.indexOf(estadoApp) >= 0 && destino.estado === "Pendiente") {
+      rev.push({
+        vale: valeRaw,
+        problemas: ["La app tiene una recepción que no está en el Sheet"],
+        corregible: false,
+        original: { fechaPedido: cell(row, "fechaPedido"), cn: cnRaw, estupefaciente: cell(row, "estupefaciente"), incidencias: cell(row, "incidencias") },
+        row: null, fechaCorregida: null,
+      });
+      continue;
+    }
+
+    const esVacio = (v) => v === "" || v == null;
     const cambios = [];
     for (const campo of CAMPOS_COMPARAR) {
-      let de, a, dif;
-      if (campo === "estado") { de = estadoPedido(actual); a = destino.estado; dif = de !== a; }
-      else if (campo === "fechaPedido" || campo === "fechaEntrada") { de = actual[campo]; a = destino[campo]; dif = !mismaFecha(toDate, de, a); }
-      else if (campo === "udsPedidas" || campo === "udsRecibidas") {
-        de = actual[campo]; a = destino[campo];
-        const na = (de === "" || de == null) ? "" : String(Number(de));
-        const nb = (a === "" || a == null) ? "" : String(Number(a));
-        dif = na !== nb;
-      } else if (campo === "noServido") { de = !!actual[campo]; a = !!destino[campo]; dif = de !== a; }
-      else { de = actual[campo]; a = destino[campo]; dif = String(de == null ? "" : de).trim() !== String(a == null ? "" : a).trim(); }
+      const de = actual[campo], a = destino[campo];
+      // "Vacío del Sheet no sobrescribe": si el Sheet no trae dato y la app sí, se ignora.
+      if (esVacio(a) && !esVacio(de)) continue;
+      let dif;
+      if (campo === "fechaPedido" || campo === "fechaEntrada") dif = !mismaFecha(toDate, de, a);
+      else if (campo === "udsPedidas" || campo === "udsRecibidas") dif = (esVacio(de) ? "" : String(Number(de))) !== (esVacio(a) ? "" : String(Number(a)));
+      else if (campo === "noServido") dif = !!de !== !!a;
+      else dif = String(esVacio(de) ? "" : de).trim() !== String(esVacio(a) ? "" : a).trim();
       if (dif) cambios.push({ campo, de, a });
     }
     if (cambios.length) {
       const merged = { ...actual };
-      cambios.forEach((c) => { if (c.campo !== "estado") merged[c.campo] = c.a; });
-      merged.estado = estadoPedido(merged);
+      cambios.forEach((c) => { merged[c.campo] = c.a; });
+      const estadoMerged = estadoPedido(merged);
+      merged.estado = estadoMerged;
+      if (estadoMerged !== estadoApp) cambios.push({ campo: "estado", de: estadoApp, a: estadoMerged });
       upd.push({ id: actual.id, vale: valeRaw, cambios, row: merged });
     }
   }
