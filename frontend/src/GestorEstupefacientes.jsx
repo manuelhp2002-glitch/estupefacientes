@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import * as XLSX from "xlsx";
+import { planSincronizacion } from "./sync/pedidosSheet.js";
 import {
   Home, ClipboardList, History, ShieldAlert, PackageSearch, CalendarX,
   AlertTriangle, Plus, Save, X, Upload, Search, CheckCircle2, Clock,
@@ -280,6 +281,8 @@ const DEFAULT_CONFIG = {
     fenta: { warn: 1, orange: 51, crit: 151 },
   },
   alertaDescuadre: { warn: false, orange: false, crit: true },
+  // Sincronización de pedidos con el Sheet compartido (F4): fecha de corte y última sync.
+  syncPedidos: { corte: "2026-10-01", ultima: "" },
 };
 
 // Rellena/normaliza un config almacenado con los valores por defecto (evita huecos)
@@ -292,7 +295,12 @@ function mergeConfig(stored) {
   };
   const sa = s.alertaDescuadre || {};
   const flag = (k) => (k in sa ? !!sa[k] : d.alertaDescuadre[k]);
-  return { descuadre: { oral: cat("oral"), iv: cat("iv"), fenta: cat("fenta") }, alertaDescuadre: { warn: flag("warn"), orange: flag("orange"), crit: flag("crit") } };
+  const sp = s.syncPedidos || {};
+  return {
+    descuadre: { oral: cat("oral"), iv: cat("iv"), fenta: cat("fenta") },
+    alertaDescuadre: { warn: flag("warn"), orange: flag("orange"), crit: flag("crit") },
+    syncPedidos: { corte: sp.corte || d.syncPedidos.corte, ultima: sp.ultima || d.syncPedidos.ultima },
+  };
 }
 
 // Categoría de umbrales de un medicamento: el fentanilo 150 mcg/3mL amp (V07610) es aparte
@@ -352,6 +360,7 @@ function makeApi(getUrl) {
     appendMany: (sheet, rows) => call("appendMany", { sheet, rows }),
     update: (sheet, id, row) => call("update", { sheet, id, row }),
     remove: (sheet, id) => call("remove", { sheet, id }),
+    leerRegistroPedidos: (p) => call("leerRegistroPedidos", p || {}),
   };
 }
 
@@ -1403,6 +1412,14 @@ function estadoPedido(p) {
   return "Pendiente";
 }
 const estadoBadge = { Pendiente: "info", Recibido: "ok", Incidencia: "warn", "No servido": "crit" };
+// Etiquetas y formato de los cambios mostrados en el drawer de sincronización (F4)
+const ETIQ_CAMPO = { fechaPedido: "F. pedido", udsPedidas: "Pedidas", fechaEntrada: "Entrada", udsRecibidas: "Recibidas", proveedor: "Proveedor", farmaceutico: "Farmacéutico", incidencias: "Incidencias", noServido: "No servido", estado: "Estado" };
+function fmtCambioSync(campo, val) {
+  if (campo === "fechaPedido" || campo === "fechaEntrada") return val ? fmtDate(val) : "—";
+  if (campo === "noServido") return val ? "Sí" : "No";
+  if (val === "" || val == null) return "—";
+  return String(val);
+}
 
 // Siguiente nº de vale (#7): coge el vale con el número más alto (ej. "HA1050"),
 // conserva su prefijo y su nº de dígitos, y le suma 1 → "HA1051". Si no hay
@@ -1419,13 +1436,68 @@ function nextVale(pedidos) {
   return `${best.prefix}${String(best.num + 1).padStart(best.width, "0")}`;
 }
 
-function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, cnMap, cnCatalogo, prefill, clearPrefill }) {
+function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, cnMap, cnCatalogo, prefill, clearPrefill, config, onSaveConfig, onLeerRegistro, onListPedidos, onConfirmSync }) {
   const [openNew, setOpenNew] = useState(false);
   const [openRecep, setOpenRecep] = useState(null);
   const [f, setF] = useState({});
   const [r, setR] = useState({});
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
+
+  // --- Sincronización con el Sheet compartido (F4) ---
+  const [openSync, setOpenSync] = useState(false);
+  const [syncLoading, setSyncLoading] = useState(false);
+  const [syncErr, setSyncErr] = useState("");
+  const [sheetData, setSheetData] = useState(null);     // { headers, rows } | { error }
+  const [serverPedidos, setServerPedidos] = useState([]);
+  const [corte, setCorte] = useState((config && config.syncPedidos && config.syncPedidos.corte) || "2026-10-01");
+  const [acepta, setAcepta] = useState({});             // índice de rev corregible → aceptada
+  const [confirmando, setConfirmando] = useState(false);
+  const [tocados, setTocados] = useState([]);           // ids resaltados tras confirmar
+  const ultimaSync = (config && config.syncPedidos && config.syncPedidos.ultima) || "";
+
+  const plan = useMemo(() => {
+    if (!sheetData || sheetData.error) return null;
+    return planSincronizacion(sheetData, serverPedidos, cnCatalogo, meds, corte, { toDate, estadoPedido });
+  }, [sheetData, serverPedidos, corte, cnCatalogo, meds]);
+
+  const abrirSync = async () => {
+    setOpenSync(true); setSyncErr(""); setSheetData(null); setAcepta({}); setSyncLoading(true);
+    try {
+      const [sheet, serv] = await Promise.all([onLeerRegistro(), onListPedidos()]);
+      if (sheet && sheet.error) { setSyncErr(sheet.error); setSheetData(null); }
+      else setSheetData(sheet);
+      setServerPedidos(Array.isArray(serv) ? serv : (serv == null ? pedidos : serv));
+    } catch (e) { setSyncErr("No se pudo leer el Sheet: " + (e && e.message ? e.message : e)); }
+    finally { setSyncLoading(false); }
+  };
+  const cerrarSync = () => { setOpenSync(false); setSheetData(null); setSyncErr(""); setAcepta({}); };
+  const cambiarCorte = (v) => {
+    setCorte(v);
+    if (onSaveConfig && config) onSaveConfig({ ...config, syncPedidos: { ...(config.syncPedidos || {}), corte: v } });
+  };
+
+  // Nº de cambios a confirmar = añadidos + actualizados + revisiones corregibles aceptadas
+  const nAceptadas = plan ? plan.rev.filter((x, i) => x.corregible && acepta[i]).length : 0;
+  const nConfirmar = plan && !plan.error ? plan.add.length + plan.upd.length + nAceptadas : 0;
+
+  const confirmarSync = async () => {
+    if (!plan || plan.error || nConfirmar === 0 || confirmando) return;
+    setConfirmando(true); setSyncErr("");
+    try {
+      const addRev = plan.rev.filter((x, i) => x.corregible && acepta[i] && x.row).map((x) => x.row);
+      const res = await onConfirmSync({ add: [...plan.add, ...addRev], upd: plan.upd });
+      if (onSaveConfig && config) onSaveConfig({ ...config, syncPedidos: { ...(config.syncPedidos || {}), corte, ultima: new Date().toISOString() } });
+      setTocados(res.touchedIds || []);
+      setTimeout(() => setTocados([]), 6000);
+      cerrarSync();
+      notifySync(`${res.added} pedido(s) añadido(s) · ${res.updated} actualizado(s)`);
+    } catch (e) { setSyncErr("Error al guardar: " + (e && e.message ? e.message : e) + ". Revisa qué se guardó y reintenta."); }
+    finally { setConfirmando(false); }
+  };
+  // Toast local ligero (la app ya muestra el suyo en escrituras; este confirma el resumen)
+  const [syncToast, setSyncToast] = useState("");
+  const notifySync = (m) => { setSyncToast(m); setTimeout(() => setSyncToast(""), 4000); };
 
   // Abre "Nuevo pedido": siembra la fecha de hoy y el siguiente nº de vale (editable) (#7)
   const abrirNuevo = (base) => {
@@ -1522,7 +1594,12 @@ function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, cnMap, cnCatalogo,
 
   return (
     <div>
-      <SectionTitle title="Registro de pedidos" desc="Sustituye el Excel de seguimiento de pedidos a proveedor." right={<button style={btnPrimary} onClick={() => abrirNuevo()}><Plus size={16} /> Nuevo pedido</button>} />
+      <SectionTitle title="Registro de pedidos" desc="Sustituye el Excel de seguimiento de pedidos a proveedor."
+        right={<div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button style={btnGhost} onClick={abrirSync} title="Importar pedidos del Google Sheet compartido"><RefreshCw size={16} /> Sincronizar con el Sheet</button>
+          <button style={btnPrimary} onClick={() => abrirNuevo()}><Plus size={16} /> Nuevo pedido</button>
+        </div>} />
+      {ultimaSync && <div style={{ fontSize: 12, color: C.sub, marginTop: -8, marginBottom: 12 }}>Última sincronización: {fmtStamp(ultimaSync)}</div>}
       <Card style={{ padding: 0, overflow: "hidden" }}>
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 900 }}>
@@ -1534,7 +1611,7 @@ function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, cnMap, cnCatalogo,
               {pedidosOrdenados.map((p) => {
                 const est = estadoPedido(p);
                 return (
-                  <tr key={p.id}>
+                  <tr key={p.id} style={tocados.includes(p.id) ? { background: C.yellowBg, transition: "background 1.5s" } : undefined}>
                     <td style={td}>{p.vale}</td><td style={td}>{p.cn}</td><td style={{ ...td, minWidth: 200 }}>{p.estupefaciente}</td>
                     <td style={td}>{p.proveedor}</td><td style={td}>{fmtDate(p.fechaPedido)}</td><td style={td}>{p.udsPedidas}</td>
                     <td style={td}>{p.udsRecibidas ?? "—"}</td>
@@ -1622,6 +1699,66 @@ function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, cnMap, cnCatalogo,
           )}
         </>}
       </Drawer>
+
+      {/* Sincronización con el Sheet compartido */}
+      <Drawer open={openSync} wide title="Sincronizar pedidos con el Sheet" onClose={cerrarSync}
+        footer={<>
+          <button style={btnGhost} onClick={cerrarSync}>Cancelar</button>
+          <button style={{ ...btnPrimary, opacity: nConfirmar && !confirmando ? 1 : 0.5 }} disabled={!nConfirmar || confirmando} onClick={confirmarSync}>
+            <Save size={15} /> {confirmando ? "Guardando…" : `Confirmar ${nConfirmar} cambio${nConfirmar === 1 ? "" : "s"}`}
+          </button>
+        </>}>
+        {syncErr && <div style={errBox}>{syncErr}</div>}
+        {syncLoading && <div style={{ padding: 20, textAlign: "center", color: C.sub, display: "flex", gap: 8, alignItems: "center", justifyContent: "center" }}><RefreshCw size={18} /> Leyendo el Sheet compartido…</div>}
+        {!syncLoading && plan && plan.error && <div style={errBox}>{plan.error}</div>}
+        {!syncLoading && plan && !plan.error && (<>
+          <Field label="Pedidos desde (fecha de corte)"><input type="date" style={{ ...inputStyle, width: 190 }} value={corte} onChange={(e) => cambiarCorte(e.target.value)} /></Field>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", margin: "12px 0" }}>
+            <Badge level="ok">{plan.add.length} añadir</Badge>
+            <Badge level="info">{plan.upd.length} actualizar</Badge>
+            <Badge level="warn">{plan.rev.length} revisar</Badge>
+          </div>
+
+          {plan.rev.length > 0 && <Card style={{ background: C.yellowBg, borderColor: C.yellow, marginBottom: 12 }}>
+            <div style={{ fontWeight: 700, color: "#854d0e", marginBottom: 8 }}>Para revisar ({plan.rev.length})</div>
+            {plan.rev.map((x, i) => (
+              <div key={i} style={{ borderTop: i ? `1px solid ${C.yellow}` : "none", padding: "8px 0", fontSize: 13, color: C.text }}>
+                <b>Vale {x.vale || "(vacío)"}</b> — {x.problemas.join("; ")}
+                <div style={{ fontSize: 12, color: C.sub, marginTop: 2 }}>En el Sheet: fecha «{x.original.fechaPedido}» · CN «{x.original.cn}»</div>
+                {x.corregible
+                  ? <label style={{ display: "inline-flex", gap: 6, alignItems: "center", marginTop: 4, fontSize: 13 }}><input type="checkbox" checked={!!acepta[i]} onChange={(e) => setAcepta((p) => ({ ...p, [i]: e.target.checked }))} /> Registrar con la corrección (pedido {fmtDate(x.fechaCorregida)})</label>
+                  : <div style={{ fontSize: 12, color: C.red, marginTop: 4 }}>No se puede registrar hasta corregirlo en el Sheet.</div>}
+              </div>
+            ))}
+          </Card>}
+
+          {plan.upd.length > 0 && <Card style={{ marginBottom: 12 }}>
+            <div style={{ fontWeight: 700, marginBottom: 8 }}>Actualizar ({plan.upd.length})</div>
+            {plan.upd.map((u, i) => (
+              <div key={i} style={{ borderTop: i ? `1px solid ${C.border}` : "none", padding: "8px 0", fontSize: 13 }}>
+                <b>Vale {u.vale}</b>
+                <div style={{ fontSize: 12, color: C.sub, marginTop: 2, display: "flex", gap: 10, flexWrap: "wrap" }}>
+                  {u.cambios.map((c, j) => <span key={j}>{ETIQ_CAMPO[c.campo] || c.campo}: <s style={{ color: C.red }}>{fmtCambioSync(c.campo, c.de)}</s> → <b>{fmtCambioSync(c.campo, c.a)}</b></span>)}
+                </div>
+              </div>
+            ))}
+          </Card>}
+
+          {plan.add.length > 0 && <Card>
+            <div style={{ fontWeight: 700, marginBottom: 8 }}>Añadir ({plan.add.length})</div>
+            {plan.add.map((a, i) => (
+              <div key={i} style={{ borderTop: i ? `1px solid ${C.border}` : "none", padding: "8px 0", fontSize: 13, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                <b>Vale …{String(a.vale).slice(-3)}</b> <span style={{ color: C.sub }}>{a.estupefaciente || "(sin medicamento)"}</span>
+                <span style={{ color: C.sub }}>· {a.proveedor || "—"} · pedido {fmtDate(a.fechaPedido)}{a.fechaEntrada ? ` · entrada ${fmtDate(a.fechaEntrada)}` : ""} · {a.udsPedidas} uds</span>
+                <Badge level={estadoBadge[a.estado]}>{a.estado}</Badge>
+              </div>
+            ))}
+          </Card>}
+
+          {plan.rev.length - nAceptadas > 0 && <div style={{ fontSize: 12, color: C.sub, marginTop: 10 }}>Se quedan fuera {plan.rev.length - nAceptadas} fila(s) a revisar que no has aceptado.</div>}
+        </>)}
+      </Drawer>
+      {syncToast && <div style={{ position: "fixed", bottom: 22, left: "50%", transform: "translateX(-50%)", zIndex: 70, background: C.indigo, color: "#fff", padding: "11px 18px", borderRadius: 12, fontSize: 14, fontWeight: 600, boxShadow: "0 8px 24px rgba(0,0,0,0.25)" }}>{syncToast}</div>}
     </div>
   );
 }
@@ -3210,6 +3347,29 @@ export default function App() {
   };
   const actualizarPedido = async (p) => { setPedidos((prev) => prev.map((x) => x.id === p.id ? p : x)); await enqueue({ action: "update", sheet: "Pedidos", id: p.id, row: p }); if (p.avisoLlegada && estadoPedido(p) === "Pendiente") notify("Aviso de llegada registrado — notificado al supervisor"); else notify("Pedido actualizado" + pendSuffix()); };
 
+  // Sincronización de pedidos con el Sheet compartido (F4). Lectura (solo del Sheet),
+  // estado real del servidor, y confirmación con escritura por cola (nunca borra).
+  const leerRegistroPedidos = () => api.leerRegistroPedidos();
+  const listarPedidosServidor = async () => { try { const r = await api.list("Pedidos"); return (r && r.rows) || []; } catch (e) { return null; } };
+  const confirmarSyncPedidos = async ({ add, upd }) => {
+    // Anti-duplicado: re-leer del servidor y descartar los vales que ya existan
+    const servidor = await listarPedidosServidor();
+    const base = servidor || pedidos;
+    const valesExist = new Set(base.map((p) => String(p.vale || "").trim().toLowerCase()));
+    const addRows = (add || [])
+      .filter((r) => !valesExist.has(String(r.vale || "").trim().toLowerCase()))
+      .map((r) => ({ id: uid(), ...r }));
+    if (addRows.length) await enqueue({ action: "appendMany", sheet: "Pedidos", rows: addRows });
+    for (const u of (upd || [])) await enqueue({ action: "update", sheet: "Pedidos", id: u.id, row: u.row });
+    // Refresco optimista del estado local (añadidos + actualizados)
+    setPedidos((prev) => {
+      const byId = new Map(prev.map((p) => [p.id, p]));
+      (upd || []).forEach((u) => { if (byId.has(u.id)) byId.set(u.id, u.row); });
+      return [...addRows, ...Array.from(byId.values())];
+    });
+    return { added: addRows.length, updated: (upd || []).length, touchedIds: [...addRows.map((r) => r.id), ...(upd || []).map((u) => u.id)] };
+  };
+
   // Declaraciones de caducados (#14): guardar (local + fila "__declaraciones__" de Catalogo, compartido)
   const guardarDeclaraciones = async (nuevo) => {
     setDeclaraciones(nuevo);
@@ -3334,7 +3494,7 @@ export default function App() {
         {view === "prevision" && <Prevision inventarios={inventarios} pedidos={pedidos} consumosGuardados={consumos} onGuardarConsumos={guardarConsumos} />}
         {view === "detector" && <DetectorAlertas onResumen={registrarResumenAlertas} onGuardarCruce={guardarCruce} sheetsConnected={connected} onNombrePaciente={() => notify("⚠️ Posible nombre de paciente detectado y excluido del procesamiento", "crit")} medByV={medByV} />}
         {view === "alertas" && <AlertasView alertas={alertas} onEstado={marcarAlerta} onPedir={pedirDesdeAlerta} />}
-        {view === "pedidos" && <RegistroPedidos pedidos={pedidos} onCreate={crearPedido} onUpdate={actualizarPedido} meds={meds} cnMap={cnMap} cnCatalogo={cnCatalogo} prefill={pedidoPrefill} clearPrefill={() => setPedidoPrefill(null)} />}
+        {view === "pedidos" && <RegistroPedidos pedidos={pedidos} onCreate={crearPedido} onUpdate={actualizarPedido} meds={meds} cnMap={cnMap} cnCatalogo={cnCatalogo} prefill={pedidoPrefill} clearPrefill={() => setPedidoPrefill(null)} config={config} onSaveConfig={guardarConfig} onLeerRegistro={leerRegistroPedidos} onListPedidos={listarPedidosServidor} onConfirmSync={confirmarSyncPedidos} />}
         {view === "caducados" && <Caducados caducados={caducados} onCreate={crearCaducado} meds={meds} cnMap={cnMap} declaraciones={declaraciones} onNuevaDeclaracion={nuevaDeclaracion} />}
         {view === "incidencias" && <Incidencias incidencias={incidencias} onCreate={crearIncidencia} onUpdate={actualizarIncidencia} prefill={incPrefill} clearPrefill={() => setIncPrefill(null)} meds={meds} />}
         {view === "configuracion" && <ConfiguracionView config={config} onSave={guardarConfig} cnCatalogo={cnCatalogo} meds={meds} onSaveCn={guardarCnCatalogo} onSaveNiveles={guardarNiveles} />}

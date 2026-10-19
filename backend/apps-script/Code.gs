@@ -21,6 +21,11 @@
 // se usa la hoja activa. Si es standalone, pon aquí el ID de la Spreadsheet.
 var SPREADSHEET_ID = "";
 
+// Sheet compartido "ESTUPEFACIENTES REGISTRO PEDIDOS" (externo, SOLO LECTURA) desde el
+// que el botón «Sincronizar con el Sheet» de F4 importa pedidos. NUNCA se escribe en él.
+var REGISTRO_PEDIDOS_ID = "1g5yChG0TKFy_8zM4EhGW03hj3A-EUkAMQMig2TLRqqc";
+var REGISTRO_PEDIDOS_PESTANA = "2026";
+
 function ss_() {
   if (SPREADSHEET_ID) return SpreadsheetApp.openById(SPREADSHEET_ID);
   var a = SpreadsheetApp.getActiveSpreadsheet();
@@ -69,6 +74,7 @@ function doPost(e) {
       case "appendMany": out = appendMany_(p.sheet, p.rows); break;
       case "update":     out = updateRow_(p.sheet, p.id, p.row); break;
       case "remove":     out = removeRow_(p.sheet, p.id); break;
+      case "leerRegistroPedidos": out = leerRegistroPedidos_(p); break; // solo lectura (F4)
       case "ping":       out = { status: "ok" }; break;
       default:           out = { error: "Acción no reconocida: " + body.action };
     }
@@ -83,6 +89,28 @@ function doPost(e) {
 function json_(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj))
     .setMimeType(ContentService.MimeType.JSON);
+}
+
+/* ===========================================================================
+   LECTURA DEL SHEET COMPARTIDO DE PEDIDOS (F4) — SOLO LECTURA
+   Lee la pestaña del registro compartido con getDisplayValues() (texto tal como se
+   ve: conserva erratas y evita que Apps Script reconvierta fechas con otra zona
+   horaria). NO escribe nada en ese Sheet bajo ninguna circunstancia.
+=========================================================================== */
+function leerRegistroPedidos_(payload) {
+  var pestana = (payload && payload.pestana) ? String(payload.pestana) : REGISTRO_PEDIDOS_PESTANA;
+  var hoja = SpreadsheetApp.openById(REGISTRO_PEDIDOS_ID).getSheetByName(pestana);
+  if (!hoja) return { error: 'Pestaña "' + pestana + '" no encontrada en el registro de pedidos' };
+  var valores = hoja.getDataRange().getDisplayValues();
+  if (!valores.length) return { headers: [], rows: [] };
+  var headers = valores[0].map(function (h) { return String(h); });
+  var rows = [];
+  for (var i = 1; i < valores.length; i++) {
+    var fila = valores[i];
+    if (fila.every(function (c) { return String(c).trim() === ""; })) continue; // salta filas 100% vacías
+    rows.push(fila);
+  }
+  return { headers: headers, rows: rows };
 }
 
 /* ===========================================================================
