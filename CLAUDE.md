@@ -246,6 +246,10 @@ intervalo de fechas y detecta patrones E01–E12 (§8/§9). Es el módulo con m�
 Ciclo: **Pendiente → (aviso de llegada) → Recepción formal → Recibido / Incidencia /
 No servido**. Estado calculado (`estadoPedido`). El toggle **“No lo sirven”** hace
 **obligatorio** el campo de explicación de incidencia. Único módulo donde se usa **CN**.
+Botón **«Sincronizar con el Sheet»**: lee (solo lectura) la pestaña «2026» del Sheet
+compartido de pedidos, muestra en un drawer qué añadir/actualizar/revisar y solo escribe
+al confirmar (lógica pura en `frontend/src/sync/pedidosSheet.js`; acción backend
+`leerRegistroPedidos`).
 
 ### F5 — Registro de Medicamentos Caducados  *(legado: `Caducados`)*
 Registro continuo (CN, nombre, lote, fecha caducidad, uds). Buscador + filtro por
