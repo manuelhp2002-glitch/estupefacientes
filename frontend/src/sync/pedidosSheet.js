@@ -109,11 +109,21 @@ export function planSincronizacion(sheet, pedidosApp, cnCatalogo, catalogo, cort
 
   const cell = (row, campo) => (idx[campo] >= 0 ? String(row[idx[campo]] == null ? "" : row[idx[campo]]).trim() : "");
 
-  // Filas dentro del corte (las anteriores no se tocan jamás). Fecha ilegible/vacía
-  // se deja pasar para que aparezca en "revisar" en lugar de descartarse en silencio.
+  // Filas dentro del corte (las anteriores no se tocan jamás). El Sheet va en orden
+  // cronológico, así que para las filas sin fecha propia (p. ej. «NULO» antiguos) se
+  // hereda la fecha de pedido de la fila anterior solo para decidir el corte.
+  const OTRAS = ["cn", "estupefaciente", "fechaPedido", "udsPedidas", "fechaEntrada", "udsRecibidas", "proveedor", "farmaceutico", "incidencias"];
   const enAlcance = [];
+  let ultimaFecha = null; // última FECHA PEDIDO vista (ISO)
   for (const row of rows) {
-    const fp = parseFecha(cell(row, "fechaPedido"), anioActual);
+    // (1) Vale numerado en blanco: solo VALE relleno, resto vacío → ignorar en silencio.
+    if (OTRAS.every((c) => cell(row, c) === "")) continue;
+
+    let fp = parseFecha(cell(row, "fechaPedido"), anioActual);
+    if (fp.iso) ultimaFecha = fp.iso;
+    // (2) Sin fecha propia pero con contenido: hereda la de la fila anterior (cronológico).
+    else if (fp.vacia && ultimaFecha) fp = { iso: ultimaFecha, heredada: true };
+
     if (fp.iso && corteISO && fp.iso < corteISO) continue;
     enAlcance.push({ row, valeRaw: cell(row, "vale"), fp });
   }
