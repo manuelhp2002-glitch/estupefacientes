@@ -442,3 +442,22 @@ Falta uno / cantidades distintas → **E10 / E11**.
   inventados; la tabla de §9 es la única válida.)
 - Mantén el **modo local** funcionando sin backend.
 - Cualquier duda funcional que no resuelvan estos docs → **pregunta**, no asumas.
+
+---
+
+## 15. Supabase (migración desde Google Sheets — en curso)
+
+- Esquema en `supabase/migrations/` (una tabla por pestaña, tipos reales, `extra jsonb`
+  para claves nuevas, auditoría inmutable en el esquema `auditoria`, RLS sin DELETE).
+- Capa de datos: `frontend/src/api/supabaseApi.js`, con la **misma interfaz** que
+  `makeApi()` (list/append/appendMany/update/remove). Se activa con
+  `VITE_DATA_BACKEND=supabase` + `VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY`.
+  Sin esas variables la app sigue usando Sheets.
+- Realtime: los cambios de otro equipo recargan los datos al momento.
+- La cola (outbox) aparta los errores permanentes a `estupefarma.outbox.rechazadas`
+  en vez de quedarse bloqueada.
+- `remove` no existe en Supabase: los registros de estupefacientes no se borran.
+- El Apps Script se mantiene solo para leer el Sheet compartido de pedidos
+  (`leerRegistroPedidos`).
+- Fase 1 sin cuentas de usuario (rol `anon`). Fase 2: políticas para `authenticated`
+  y usuario en la auditoría.

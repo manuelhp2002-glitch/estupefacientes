@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import * as XLSX from "xlsx";
 import { planSincronizacion } from "./sync/pedidosSheet.js";
+import { makeSupabaseApi } from "./api/supabaseApi.js";
 import {
   Home, ClipboardList, History, ShieldAlert, PackageSearch, CalendarX,
   AlertTriangle, Plus, Save, X, Upload, Search, CheckCircle2, Clock,
@@ -383,6 +384,12 @@ function lsGet(key, fallback) {
 function lsSet(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch { /* cuota/privado */ } }
 function lsDel(key) { try { localStorage.removeItem(key); } catch { /* noop */ } }
 
+// Base de datos activa: "sheets" (Apps Script, por defecto) o "supabase".
+// Se elige con VITE_DATA_BACKEND en Vercel para poder volver atrás sin tocar código.
+const ENV = (import.meta.env || {});
+const DATA_BACKEND = ENV.VITE_DATA_BACKEND === "supabase" && ENV.VITE_SUPABASE_URL && ENV.VITE_SUPABASE_ANON_KEY ? "supabase" : "sheets";
+const BACKEND_NOMBRE = DATA_BACKEND === "supabase" ? "la base de datos" : "Google Sheets";
+
 // URL del Web App por defecto: así la app viene CONECTADA de fábrica y el usuario no
 // tiene que pegar nada (endpoint público /exec, ya viaja en el bundle). Se puede
 // sobreescribir desde Ajustes (localStorage) o con VITE_APPS_SCRIPT_URL en Vercel.
@@ -414,8 +421,13 @@ function useIsMobile(bp = 860) {
 function outboxRead() { return lsGet(LS.outbox, []); }
 function outboxWrite(ops) { lsSet(LS.outbox, ops); }
 function outboxAdd(op) { const ops = outboxRead(); ops.push({ opId: uid(), ts: Date.now(), ...op }); outboxWrite(ops); return ops.length; }
+// Escrituras que la base de datos rechazó de forma definitiva (no se pierden: quedan aquí)
+const LS_RECHAZADAS = "estupefarma.outbox.rechazadas";
+function rechazadasRead() { return lsGet(LS_RECHAZADAS, []); }
 // Vuelca la cola en orden FIFO. Ante error de red se detiene y conserva el resto.
-async function outboxFlush(api) {
+// Ante un error PERMANENTE (restricción de la BD, id inexistente…) aparta esa
+// escritura a "rechazadas" y sigue, para que una sola fila mala no bloquee la cola.
+async function outboxFlush(api, onRechazo) {
   if (!api.connected() || isOffline()) return outboxRead().length;
   let ops = outboxRead();
   while (ops.length) {
@@ -426,7 +438,12 @@ async function outboxFlush(api) {
       else if (op.action === "update") await api.update(op.sheet, op.id, op.row);
       else if (op.action === "remove") await api.remove(op.sheet, op.id);
       ops.shift(); outboxWrite(ops);
-    } catch (e) { break; } // se reintentará al recuperar conexión
+    } catch (e) {
+      if (!(e && e.permanent)) break; // red/servidor: se reintentará al recuperar conexión
+      lsSet(LS_RECHAZADAS, [...rechazadasRead(), { ...op, error: String(e.message || e), rechazadaTs: Date.now() }]);
+      ops.shift(); outboxWrite(ops);
+      if (onRechazo) onRechazo(op, e);
+    }
   }
   return outboxRead().length;
 }
@@ -1343,7 +1360,7 @@ function DetectorAlertas({ onResumen, onGuardarCruce, sheetsConnected, onNombreP
               onClick={guardarEnSheets}
               title={sheetsConnected ? "Guardar la tabla completa en la pestaña Cruces" : "Configura la conexión con Sheets para guardar"}>
               {guardando ? <RefreshCw size={15} /> : guardado ? <CheckCircle2 size={15} /> : <Save size={15} />}
-              {guardando ? "Guardando…" : guardado ? "Guardado en Sheets" : "Guardar tabla en base de datos"}
+              {guardando ? "Guardando…" : guardado ? "Guardado" : "Guardar tabla en base de datos"}
             </button>
             <button style={btnGhost} onClick={() => { setResultado(null); setDiag(null); setLibro(null); setHistorico(null); setGuardado(false); }}><RefreshCw size={15} /> Nuevo análisis</button>
           </div>
@@ -3128,7 +3145,10 @@ export default function App() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [url, setUrl] = useState(resolveInitialUrl);
   const urlRef = useRef(url); urlRef.current = url;
-  const api = useMemo(() => makeApi(() => urlRef.current), []);
+  const sheetsApi = useMemo(() => makeApi(() => urlRef.current), []);
+  const api = useMemo(() => DATA_BACKEND === "supabase"
+    ? makeSupabaseApi({ url: ENV.VITE_SUPABASE_URL, anonKey: ENV.VITE_SUPABASE_ANON_KEY, sheetsApi })
+    : sheetsApi, [sheetsApi]);
   const [openSettings, setOpenSettings] = useState(false);
   const [toast, setToast] = useState(null);
   const [syncing, setSyncing] = useState(false);
@@ -3178,11 +3198,14 @@ export default function App() {
   useEffect(() => { lsSet(LS.data("Declaraciones"), declaraciones); }, [declaraciones]);
 
   // Vuelca la cola de escrituras pendientes al backend (idempotente por id)
-  const flush = async () => { const restantes = await outboxFlush(api); setPendientes(restantes); return restantes; };
+  const flush = async () => {
+    const restantes = await outboxFlush(api, (op, e) => notify(`⚠️ Un cambio en ${op.sheet} no se pudo guardar y se ha apartado para revisión: ${e.message}`, "crit"));
+    setPendientes(restantes); return restantes;
+  };
 
   // Carga desde Sheets (incluye el catálogo de medicamentos de la hoja "Catalogo")
-  const cargar = async () => {
-    if (!urlRef.current) return;
+  const cargar = async ({ silencioso = false } = {}) => {
+    if (!api.connected()) return;
     setSyncing(true);
     try {
       await flush(); // primero sube lo pendiente para no pisarlo con la lectura
@@ -3218,15 +3241,22 @@ export default function App() {
         const con = await api.list("Consumos");
         if (con && con.rows) setConsumos(con.rows);
       } catch (e4) { /* backend sin hoja Consumos (aún sin desplegar): se mantienen los locales */ }
-      notify("Datos cargados desde Google Sheets");
-    } catch (e) { notify("Sin conexión a Sheets — trabajando en local", "warn"); }
+      if (!silencioso) notify(`Datos cargados desde ${BACKEND_NOMBRE}`);
+    } catch (e) { notify(`Sin conexión con ${BACKEND_NOMBRE} — trabajando en local`, "warn"); }
     setSyncing(false);
   };
   useEffect(() => { cargar(); /* eslint-disable-next-line */ }, []);
 
+  // Supabase: cuando otro equipo guarda algo, se recargan los datos al momento
+  useEffect(() => {
+    if (!api.subscribe) return undefined;
+    return api.subscribe(() => cargar({ silencioso: true }));
+    // eslint-disable-next-line
+  }, [api]);
+
   // Reintentar la cola automáticamente al recuperar conexión
   useEffect(() => {
-    const onOnline = () => { flush().then((n) => { if (n === 0) notify("Sincronizado con Google Sheets"); }); cargar(); };
+    const onOnline = () => { flush().then((n) => { if (n === 0) notify(`Sincronizado con ${BACKEND_NOMBRE}`); }); cargar(); };
     window.addEventListener("online", onOnline);
     return () => window.removeEventListener("online", onOnline);
     // eslint-disable-next-line
@@ -3470,7 +3500,7 @@ export default function App() {
         </nav>
         <div style={{ padding: 14, borderTop: "1px solid rgba(255,255,255,0.12)" }}>
           <button onClick={() => setOpenSettings(true)} style={{ width: "100%", display: "flex", gap: 8, alignItems: "center", justifyContent: "center", padding: "9px", borderRadius: 10, border: "1px solid rgba(255,255,255,0.2)", background: "transparent", color: "#fff", cursor: "pointer", fontSize: 13, fontWeight: 600 }}>
-            {connected ? <Cloud size={15} /> : <CloudOff size={15} />} {connected ? "Sheets conectado" : "Configurar Sheets"}
+            {connected ? <Cloud size={15} /> : <CloudOff size={15} />} {DATA_BACKEND === "supabase" ? (connected ? "Base de datos conectada" : "Sin base de datos") : (connected ? "Sheets conectado" : "Configurar Sheets")}
           </button>
           {pendientes > 0 && (
             <div style={{ marginTop: 8, fontSize: 11, color: "#FCD34D", textAlign: "center", display: "flex", gap: 5, alignItems: "center", justifyContent: "center" }}>
@@ -3485,7 +3515,7 @@ export default function App() {
       <main style={{ flex: 1, overflowY: "auto", padding: isMobile ? "16px 14px" : "26px 30px", minWidth: 0 }}>
         {!connected && (
           <div style={{ background: C.yellowBg, border: `1px solid ${C.yellow}`, color: "#854d0e", borderRadius: 12, padding: "10px 14px", marginBottom: 18, fontSize: 13, display: "flex", gap: 8, alignItems: "center" }}>
-            <CloudOff size={16} /> Modo local: los datos se guardan en este equipo y se sincronizarán con Google Sheets al configurar la URL del Web App (botón «Configurar Sheets»).
+            <CloudOff size={16} /> Modo local: los datos se guardan en este equipo y se sincronizarán con {BACKEND_NOMBRE} cuando haya conexión.
           </div>
         )}
         {view === "inicio" && <Inicio inventarios={inventarios} incidencias={incidencias} alertas={alertas} resumenAlertas={resumenAlertas} medByV={medByV} config={config} goTo={setView} avisosPrevision={avisosPrevision} hayConsumos={consumos.length > 0} />}
@@ -3501,11 +3531,15 @@ export default function App() {
       </main>
 
       {/* AJUSTES */}
-      <Drawer open={openSettings} title="Conexión con Google Sheets" onClose={() => setOpenSettings(false)}
+      <Drawer open={openSettings} title={DATA_BACKEND === "supabase" ? "Conexión" : "Conexión con Google Sheets"} onClose={() => setOpenSettings(false)}
         footer={<><button style={btnGhost} onClick={() => setOpenSettings(false)}>Cerrar</button><button style={btnPrimary} onClick={async () => { const u = (url || "").trim(); if (u) lsSet(LS.url, u); else lsDel(LS.url); setUrl(u); setOpenSettings(false); await cargar(); }}><RefreshCw size={15} /> Guardar y sincronizar</button></>}>
         <p style={{ fontSize: 13, color: C.sub, marginTop: 0 }}>Pega la URL del <b>Web App</b> generada al desplegar el Apps Script (<code>Code.gs</code>). Se guarda en este equipo, así que <b>no hay que volver a introducirla</b>. Cada funcionalidad se guarda en su propia pestaña del Google Sheets.</p>
         <Field label="URL del Web App (…/exec)"><input style={inputStyle} value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://script.google.com/macros/s/…/exec" /></Field>
         <div style={{ marginTop: 12, fontSize: 12, color: C.sub }}>Estado: {connected ? <Badge level="ok">Conectado</Badge> : <Badge level="warn">Modo local</Badge>} {syncing && "· sincronizando…"} {pendientes > 0 && <Badge level="warn">{pendientes} sin sincronizar</Badge>}</div>
+        {DATA_BACKEND === "supabase" && <div style={{ marginTop: 12, background: "#EEF0FF", borderRadius: 10, padding: 12, fontSize: 12, color: C.text }}>
+          Los datos se guardan en <b>Supabase</b>. Esta URL de Apps Script solo se usa para leer el Sheet compartido de pedidos (botón «Sincronizar con el Sheet»).
+          {rechazadasRead().length > 0 && <div style={{ marginTop: 8, color: C.red, fontWeight: 600 }}>{rechazadasRead().length} cambio(s) rechazados por la base de datos guardados en este equipo para revisión.</div>}
+        </div>}
         <div style={{ marginTop: 16, background: "#F3F4F6", borderRadius: 10, padding: 12, fontSize: 12, color: C.text }}>
           Pestañas: <b>Inventarios, Pedidos, Caducados, Incidencias, Cruces, Catalogo</b>. Ninguna almacena nombres de paciente. Si defines <code>VITE_APPS_SCRIPT_URL</code> en Vercel, la URL viene ya configurada por defecto.
         </div>
