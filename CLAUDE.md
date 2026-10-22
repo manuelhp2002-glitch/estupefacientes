@@ -250,6 +250,9 @@ Botón **«Sincronizar con el Sheet»**: lee (solo lectura) la pestaña «2026»
 compartido de pedidos, muestra en un drawer qué añadir/actualizar/revisar y solo escribe
 al confirmar (lógica pura en `frontend/src/sync/pedidosSheet.js`; acción backend
 `leerRegistroPedidos`).
+Botón **«Generar albarán»**: ayuda visual de **solo lectura** (no escribe nada). Drawer de
+2 pasos — elegir pedidos pendientes → tabla-albarán para comprobar cajas con una columna ✓
+que no se guarda (lógica pura en `frontend/src/albaran/albaran.js`).
 
 ### F5 — Registro de Medicamentos Caducados  *(legado: `Caducados`)*
 Registro continuo (CN, nombre, lote, fecha caducidad, uds). Buscador + filtro por

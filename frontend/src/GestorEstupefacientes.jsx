@@ -2,12 +2,13 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 import * as XLSX from "xlsx";
 import { planSincronizacion } from "./sync/pedidosSheet.js";
 import { makeSupabaseApi } from "./api/supabaseApi.js";
+import { pedidosPendientes, nombreSinCodigoV, numeroAlbaran } from "./albaran/albaran.js";
 import {
   Home, ClipboardList, History, ShieldAlert, PackageSearch, CalendarX,
   AlertTriangle, Plus, Save, X, Upload, Search, CheckCircle2, Clock,
   Settings, RefreshCw, Cloud, CloudOff, Truck, FileSpreadsheet, Trash2,
   ChevronRight, Info, Pill, Syringe, Filter, ArrowRight, ListChecks, Bell, Menu, Pencil,
-  TrendingDown, ArrowLeft, Siren, PackageCheck, Database, BellRing, Check
+  TrendingDown, ArrowLeft, Siren, PackageCheck, Database, BellRing, Check, ClipboardCheck
 } from "lucide-react";
 
 /* ============================================================================
@@ -1453,6 +1454,199 @@ function nextVale(pedidos) {
   return `${best.prefix}${String(best.num + 1).padStart(best.width, "0")}`;
 }
 
+/* ---------------------------------------------------------------------------
+   ALBARÁN DE RECEPCIÓN (F4) — ayuda visual de SOLO LECTURA. No escribe en la BD:
+   ni pedidos, ni estados, ni el albarán. La recepción formal sigue pedido a pedido.
+--------------------------------------------------------------------------- */
+// Contador informativo de albarán del día, en este navegador. Nunca va a la BD.
+function siguienteContadorAlbaran() {
+  const hoy = todayISO();
+  try {
+    const prev = JSON.parse(localStorage.getItem("estupefarma.albaran.contador") || "null");
+    const n = (prev && prev.dia === hoy) ? (Number(prev.n) || 0) + 1 : 1;
+    localStorage.setItem("estupefarma.albaran.contador", JSON.stringify({ dia: hoy, n }));
+    return n;
+  } catch { return 1; } // cuota/privado: cae a 01
+}
+// Nº de vale con los últimos 3 dígitos destacados en acento (o gris si está marcado).
+function valeDestacado(vale, dimmed) {
+  const s = String(vale == null ? "" : vale);
+  const acc = { color: dimmed ? C.sub : C.accent, fontWeight: 800 };
+  if (s.length <= 3) return <span style={acc}>{s}</span>;
+  return <>{s.slice(0, -3)}<span style={acc}>{s.slice(-3)}</span></>;
+}
+// Agrupa pedidos por proveedor, orden alfabético español.
+function gruposAlbaran(items) {
+  const map = new Map();
+  items.forEach((p) => { const k = String(p.proveedor || "").trim(); if (!map.has(k)) map.set(k, []); map.get(k).push(p); });
+  return [...map.entries()].sort((a, b) => String(a[0]).localeCompare(String(b[0]), "es"));
+}
+
+function AlbaranTabla({ filas, albaran, provsSel, checks, setChecks }) {
+  const n = filas.length;
+  const nComprobadas = filas.filter((p) => checks[p.id]).length;
+  const totalUds = filas.reduce((s, p) => s + (Number(p.udsPedidas) || 0), 0);
+  const pct = n ? Math.round((nComprobadas / n) * 100) : 0;
+  const provTxt = provsSel.length <= 1 ? `Proveedor: ${provsSel[0] || "—"}` : `Proveedores: ${provsSel.join(", ")}`;
+  const toggleCheck = (id) => setChecks((c) => ({ ...c, [id]: !c[id] }));
+  return (
+    <div>
+      <div style={{ border: `1px solid ${C.border}`, borderRadius: 12, overflow: "hidden" }}>
+        <div style={{ background: "#F3F4F6", padding: "12px 14px", display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.6, color: C.sub }}>ALBARÁN DE RECEPCIÓN</div>
+            <div style={{ fontFamily: "monospace", fontSize: 15, fontWeight: 700, color: C.text, marginTop: 2 }}>{albaran ? albaran.numero : ""}</div>
+          </div>
+          <div style={{ textAlign: "right", fontSize: 12, color: C.sub }}>
+            <div>Generado {albaran ? fmtDateTime(albaran.generado) : ""}</div>
+            <div style={{ marginTop: 2 }}>{provTxt}</div>
+          </div>
+        </div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 520 }}>
+            <thead><tr>
+              <th style={th}>F. pedido</th><th style={th}>Nº vale</th><th style={th}>Estupefaciente</th>
+              <th style={{ ...th, textAlign: "right" }}>Uds. pedidas</th><th style={{ ...th, textAlign: "center" }}>✓</th>
+            </tr></thead>
+            <tbody>
+              {filas.map((p) => {
+                const on = !!checks[p.id];
+                const cv = extraerCodigoV(p.estupefaciente);
+                const txt = on ? C.sub : C.text;
+                return (
+                  <tr key={p.id} style={{ background: on ? C.greenBg : "#fff" }}>
+                    <td style={{ ...td, whiteSpace: "nowrap", color: txt }}>{fmtDate(p.fechaPedido)}</td>
+                    <td style={{ ...td, fontFamily: "monospace", color: txt }}>{valeDestacado(p.vale, on)}</td>
+                    <td style={{ ...td, minWidth: 200, color: txt }}>{cv && <span style={{ fontFamily: "monospace", fontSize: 12 }}>{cv} · </span>}{nombreSinCodigoV(p.estupefaciente)}</td>
+                    <td style={{ ...td, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums", color: txt }}>{p.udsPedidas}</td>
+                    <td style={{ ...td, textAlign: "center" }}><input type="checkbox" checked={on} onChange={() => toggleCheck(p.id)} /></td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <div style={{ borderTop: `1px solid ${C.border}`, padding: "10px 14px", display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+          <div style={{ minWidth: 200, flex: 1 }}>
+            <div style={{ fontSize: 12, color: C.sub, marginBottom: 4 }}>{nComprobadas} de {n} líneas comprobadas</div>
+            <div style={{ height: 6, background: "#E5E7EB", borderRadius: 999, overflow: "hidden" }}>
+              <div style={{ width: `${pct}%`, height: "100%", background: C.green, transition: "width .2s" }} />
+            </div>
+          </div>
+          <div style={{ textAlign: "right" }}>
+            <div style={{ fontSize: 11, color: C.sub, fontWeight: 700 }}>TOTAL</div>
+            <div style={{ fontSize: 18, fontWeight: 800, color: C.text }}>{Number(totalUds).toLocaleString("es-ES")} uds en total</div>
+          </div>
+        </div>
+      </div>
+      <p style={{ fontSize: 12, color: C.sub, marginTop: 10 }}>La columna ✓ sirve para ir marcando en pantalla lo que cuadra mientras abres las cajas. No guarda nada; la recepción formal sigue haciéndose pedido a pedido.</p>
+    </div>
+  );
+}
+
+function AlbaranDrawer({ open, pedidos, onClose }) {
+  const [paso, setPaso] = useState(1);
+  const [sel, setSel] = useState({});            // id -> true (selección, se mantiene al filtrar)
+  const [provFiltro, setProvFiltro] = useState("TODOS");
+  const [checks, setChecks] = useState({});      // id -> true (columna ✓ del paso 2)
+  const [albaran, setAlbaran] = useState(null);  // { numero, generado: Date }
+
+  // Al abrir, el paso 1 empieza sin selección
+  useEffect(() => { if (open) { setPaso(1); setSel({}); setProvFiltro("TODOS"); setChecks({}); setAlbaran(null); } }, [open]);
+
+  const pendientes = useMemo(() => pedidosPendientes(pedidos, estadoPedido), [pedidos]);
+  const proveedores = useMemo(() => [...new Set(pendientes.map((p) => String(p.proveedor || "").trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b, "es")), [pendientes]);
+  const visibles = provFiltro === "TODOS" ? pendientes : pendientes.filter((p) => String(p.proveedor || "").trim() === provFiltro);
+  const seleccionados = pendientes.filter((p) => sel[p.id]);
+  const provsSel = [...new Set(seleccionados.map((p) => String(p.proveedor || "").trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b, "es"));
+  // Filas del albarán: por fecha de pedido y luego por vale
+  const filasAlbaran = [...seleccionados].sort((a, b) => {
+    const da = toDate(a.fechaPedido), db = toDate(b.fechaPedido);
+    const ta = da ? da.getTime() : 0, tb = db ? db.getTime() : 0;
+    if (ta !== tb) return ta - tb;
+    return String(a.vale || "").localeCompare(String(b.vale || ""), "es", { numeric: true });
+  });
+
+  const toggle = (id) => setSel((s) => ({ ...s, [id]: !s[id] }));
+  const seleccionarVisibles = () => setSel((s) => { const n = { ...s }; visibles.forEach((p) => { n[p.id] = true; }); return n; });
+  const quitarSeleccion = () => setSel({});
+  const generar = () => { const fecha = new Date(); setAlbaran({ numero: numeroAlbaran(fecha, siguienteContadorAlbaran()), generado: fecha }); setChecks({}); setPaso(2); };
+
+  if (!open) return null;
+
+  const subCab = { fontSize: 12, fontWeight: 700, color: C.sub, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 6 };
+  const linkBtn = { background: "none", border: "none", padding: 0, color: C.accent, cursor: "pointer", fontSize: 12.5, fontWeight: 600, textDecoration: "underline" };
+
+  const footer = paso === 1 ? (
+    <>
+      <button style={btnGhost} onClick={onClose}>Cancelar</button>
+      <button style={{ ...btnPrimary, opacity: seleccionados.length ? 1 : 0.5 }} disabled={!seleccionados.length} onClick={generar}><ClipboardCheck size={15} /> Generar albarán ({seleccionados.length})</button>
+    </>
+  ) : (
+    <>
+      <button style={btnGhost} onClick={() => setPaso(1)}><ArrowLeft size={15} /> Cambiar selección</button>
+      <button style={btnPrimary} onClick={onClose}>Cerrar</button>
+    </>
+  );
+
+  return (
+    <Drawer open={open} wide title="Generar albarán" onClose={onClose} footer={footer}>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, fontWeight: 700, marginBottom: 16 }}>
+        <span style={{ color: paso === 1 ? C.accent : C.sub }}>1 · Elegir pedidos</span>
+        <ChevronRight size={14} color={C.sub} />
+        <span style={{ color: paso === 2 ? C.accent : C.sub }}>2 · Albarán</span>
+      </div>
+
+      {paso === 1 ? (
+        pendientes.length === 0 ? (
+          <Empty icon={<ClipboardCheck size={26} />} text="No hay pedidos pendientes de recepcionar." />
+        ) : (
+          <div>
+            <p style={{ fontSize: 13, color: C.sub, marginTop: 0 }}>Marca los pedidos que han llegado o que vas a recepcionar. Solo aparecen los pedidos pendientes.</p>
+            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
+              <label style={{ fontSize: 13, color: C.sub }}>Proveedor</label>
+              <select style={{ ...inputStyle, width: "auto" }} value={provFiltro} onChange={(e) => setProvFiltro(e.target.value)}>
+                <option value="TODOS">Todos</option>
+                {proveedores.map((pr) => <option key={pr} value={pr}>{pr}</option>)}
+              </select>
+              <button style={linkBtn} onClick={seleccionarVisibles}>Seleccionar todos los visibles</button>
+              <button style={linkBtn} onClick={quitarSeleccion}>Quitar selección</button>
+            </div>
+            {gruposAlbaran(visibles).map(([prov, items]) => (
+              <div key={prov} style={{ marginBottom: 14 }}>
+                <div style={subCab}>{(prov || "sin proveedor").toUpperCase()} · {items.length} pendientes</div>
+                {items.map((p) => {
+                  const on = !!sel[p.id];
+                  return (
+                    <button key={p.id} type="button" onClick={() => toggle(p.id)} style={{
+                      width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 10, cursor: "pointer",
+                      border: `1px solid ${on ? C.accent : C.border}`, background: on ? "#EEF0FF" : "#fff",
+                      borderRadius: 10, padding: "9px 12px", marginBottom: 6,
+                    }}>
+                      <input type="checkbox" readOnly checked={on} style={{ pointerEvents: "none" }} />
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontFamily: "monospace", fontSize: 14, fontWeight: 700, color: C.text }}>Vale {valeDestacado(p.vale)}</div>
+                        <div style={{ fontSize: 12, color: C.sub, marginTop: 2 }}>{nombreSinCodigoV(p.estupefaciente)} · pedido {fmtDate(p.fechaPedido)}</div>
+                      </div>
+                      <div style={{ textAlign: "right" }}>
+                        <div style={{ fontSize: 18, fontWeight: 800, color: C.text }}>{p.udsPedidas}</div>
+                        <div style={{ fontSize: 11, color: C.sub }}>uds</div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            ))}
+            {provsSel.length > 1 && <div style={{ fontSize: 12, color: C.yellow, display: "flex", gap: 6, alignItems: "center", marginTop: 4 }}><AlertTriangle size={13} /> Has mezclado varios proveedores en un mismo albarán.</div>}
+          </div>
+        )
+      ) : (
+        <AlbaranTabla filas={filasAlbaran} albaran={albaran} provsSel={provsSel} checks={checks} setChecks={setChecks} />
+      )}
+    </Drawer>
+  );
+}
+
 function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, cnMap, cnCatalogo, prefill, clearPrefill, config, onSaveConfig, onLeerRegistro, onListPedidos, onConfirmSync }) {
   const [openNew, setOpenNew] = useState(false);
   const [openRecep, setOpenRecep] = useState(null);
@@ -1460,6 +1654,7 @@ function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, cnMap, cnCatalogo,
   const [r, setR] = useState({});
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
+  const [openAlbaran, setOpenAlbaran] = useState(false); // albarán de recepción (ayuda visual, solo lectura)
 
   // --- Sincronización con el Sheet compartido (F4) ---
   const [openSync, setOpenSync] = useState(false);
@@ -1614,6 +1809,7 @@ function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, cnMap, cnCatalogo,
       <SectionTitle title="Registro de pedidos" desc="Sustituye el Excel de seguimiento de pedidos a proveedor."
         right={<div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button style={btnGhost} onClick={abrirSync} title="Importar pedidos del Google Sheet compartido"><RefreshCw size={16} /> Sincronizar con el Sheet</button>
+          <button style={btnPrimary} onClick={() => setOpenAlbaran(true)} title="Tabla de ayuda para comprobar los pedidos que llegan"><ClipboardCheck size={16} /> Generar albarán</button>
           <button style={btnPrimary} onClick={() => abrirNuevo()}><Plus size={16} /> Nuevo pedido</button>
         </div>} />
       {ultimaSync && <div style={{ fontSize: 12, color: C.sub, marginTop: -8, marginBottom: 12 }}>Última sincronización: {fmtStamp(ultimaSync)}</div>}
@@ -1653,6 +1849,9 @@ function RegistroPedidos({ pedidos, onCreate, onUpdate, meds, cnMap, cnCatalogo,
           </table>
         </div>
       </Card>
+
+      {/* Albarán de recepción (ayuda visual, solo lectura) */}
+      <AlbaranDrawer open={openAlbaran} pedidos={pedidos} onClose={() => setOpenAlbaran(false)} />
 
       {/* Nuevo / Editar pedido */}
       <Drawer open={openNew} title={editando ? "Editar pedido" : "Nuevo pedido"} onClose={cerrarNuevo}
