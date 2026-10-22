@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 import * as XLSX from "xlsx";
 import { planSincronizacion } from "./sync/pedidosSheet.js";
 import { makeSupabaseApi } from "./api/supabaseApi.js";
-import { pedidosPendientes, nombreSinCodigoV, numeroAlbaran } from "./albaran/albaran.js";
+import { nombreSinCodigoV, numeroAlbaran, filtrarParaAlbaran } from "./albaran/albaran.js";
 import {
   Home, ClipboardList, History, ShieldAlert, PackageSearch, CalendarX,
   AlertTriangle, Plus, Save, X, Upload, Search, CheckCircle2, Clock,
@@ -1550,14 +1550,28 @@ function AlbaranDrawer({ open, pedidos, onClose }) {
   const [provFiltro, setProvFiltro] = useState("TODOS");
   const [checks, setChecks] = useState({});      // id -> true (columna ✓ del paso 2)
   const [albaran, setAlbaran] = useState(null);  // { numero, generado: Date }
+  // Fecha de corte editable: se recuerda en localStorage; por defecto 01/10/2026
+  const [fechaCorte, setFechaCorte] = useState(() => { try { return localStorage.getItem("estupefarma.albaran.fechaCorte") || "2026-10-01"; } catch { return "2026-10-01"; } });
+  const cambiarCorte = (v) => { setFechaCorte(v); try { localStorage.setItem("estupefarma.albaran.fechaCorte", v); } catch { /* cuota/privado */ } };
 
-  // Al abrir, el paso 1 empieza sin selección
+  // Al abrir, el paso 1 empieza sin selección (la fecha de corte se conserva)
   useEffect(() => { if (open) { setPaso(1); setSel({}); setProvFiltro("TODOS"); setChecks({}); setAlbaran(null); } }, [open]);
 
-  const pendientes = useMemo(() => pedidosPendientes(pedidos, estadoPedido), [pedidos]);
-  const proveedores = useMemo(() => [...new Set(pendientes.map((p) => String(p.proveedor || "").trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b, "es")), [pendientes]);
-  const visibles = provFiltro === "TODOS" ? pendientes : pendientes.filter((p) => String(p.proveedor || "").trim() === provFiltro);
-  const seleccionados = pendientes.filter((p) => sel[p.id]);
+  // Pipeline: real → pendiente → fecha de corte → proveedor (lógica pura, un solo sitio)
+  const { enVentana, visibles, ocultosPorCorte, proveedores, totalReales } = useMemo(
+    () => filtrarParaAlbaran(pedidos, { fechaCorte, proveedor: provFiltro }, { estadoPedido }),
+    [pedidos, fechaCorte, provFiltro]
+  );
+  // La selección solo puede contener pedidos dentro de la ventana: si uno queda oculto
+  // por el corte se quita, para que nunca entre en el albarán algo que no se ve.
+  const ventanaIds = enVentana.map((p) => p.id).join(",");
+  useEffect(() => {
+    const vis = new Set(enVentana.map((p) => p.id));
+    setSel((s) => { let changed = false; const n = {}; for (const id in s) { if (s[id] && vis.has(id)) n[id] = true; else if (s[id]) changed = true; } return changed ? n : s; });
+    // eslint-disable-next-line
+  }, [ventanaIds]);
+
+  const seleccionados = enVentana.filter((p) => sel[p.id]);
   const provsSel = [...new Set(seleccionados.map((p) => String(p.proveedor || "").trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b, "es"));
   // Filas del albarán: por fecha de pedido y luego por vale
   const filasAlbaran = [...seleccionados].sort((a, b) => {
@@ -1598,12 +1612,14 @@ function AlbaranDrawer({ open, pedidos, onClose }) {
       </div>
 
       {paso === 1 ? (
-        pendientes.length === 0 ? (
+        totalReales === 0 ? (
           <Empty icon={<ClipboardCheck size={26} />} text="No hay pedidos pendientes de recepcionar." />
         ) : (
           <div>
             <p style={{ fontSize: 13, color: C.sub, marginTop: 0 }}>Marca los pedidos que han llegado o que vas a recepcionar. Solo aparecen los pedidos pendientes.</p>
-            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
+            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 6 }}>
+              <label style={{ fontSize: 13, color: C.sub }}>Pedidos desde</label>
+              <input type="date" style={{ ...inputStyle, width: "auto" }} value={fechaCorte} onChange={(e) => cambiarCorte(e.target.value)} />
               <label style={{ fontSize: 13, color: C.sub }}>Proveedor</label>
               <select style={{ ...inputStyle, width: "auto" }} value={provFiltro} onChange={(e) => setProvFiltro(e.target.value)}>
                 <option value="TODOS">Todos</option>
@@ -1612,6 +1628,11 @@ function AlbaranDrawer({ open, pedidos, onClose }) {
               <button style={linkBtn} onClick={seleccionarVisibles}>Seleccionar todos los visibles</button>
               <button style={linkBtn} onClick={quitarSeleccion}>Quitar selección</button>
             </div>
+            {fechaCorte && ocultosPorCorte.length > 0 && (
+              <div style={{ fontSize: 12, color: C.sub, marginBottom: 12 }}>
+                {ocultosPorCorte.length} {ocultosPorCorte.length === 1 ? "pedido pendiente anterior" : "pedidos pendientes anteriores"} al {fmtDate(fechaCorte)} no se {ocultosPorCorte.length === 1 ? "muestra" : "muestran"}.
+              </div>
+            )}
             {gruposAlbaran(visibles).map(([prov, items]) => (
               <div key={prov} style={{ marginBottom: 14 }}>
                 <div style={subCab}>{(prov || "sin proveedor").toUpperCase()} · {items.length} pendientes</div>
@@ -1637,6 +1658,7 @@ function AlbaranDrawer({ open, pedidos, onClose }) {
                 })}
               </div>
             ))}
+            {visibles.length === 0 && <div style={{ fontSize: 13, color: C.sub, padding: "6px 0" }}>Ningún pedido pendiente en este rango de fechas.</div>}
             {provsSel.length > 1 && <div style={{ fontSize: 12, color: C.yellow, display: "flex", gap: 6, alignItems: "center", marginTop: 4 }}><AlertTriangle size={13} /> Has mezclado varios proveedores en un mismo albarán.</div>}
           </div>
         )
