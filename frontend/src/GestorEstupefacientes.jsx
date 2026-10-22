@@ -2575,25 +2575,10 @@ function Incidencias({ incidencias, onCreate, onUpdate, prefill, clearPrefill, m
 /* ===========================================================================
    INICIO
 =========================================================================== */
-// Agrupa las líneas de inventario por (fecha, grupo) y calcula el estado de cada inventario.
-function resumenInventarios(inventarios, medByV) {
-  const meds = Object.values(medByV || {});
-  const byKey = new Map();
-  (inventarios || []).forEach((r) => {
-    const k = `${fmtDate(r.fecha)}__${r.grupo}`;
-    if (!byKey.has(k)) byKey.set(k, { fecha: r.fecha, grupo: r.grupo, filas: [] });
-    byKey.get(k).filas.push(r);
-  });
-  return [...byKey.values()].map((inv) => ({ ...inv, estado: estadoInventario(inv.filas, meds.filter((m) => m.grupo === inv.grupo)) }));
-}
-
-function Inicio({ inventarios, incidencias, alertas, resumenAlertas, medByV, config, goTo, avisosPrevision = [], hayConsumos, onCompletar }) {
+function Inicio({ inventarios, incidencias, alertas, resumenAlertas, medByV, config, goTo, avisosPrevision = [], hayConsumos }) {
   const fechas = [...new Set(inventarios.map((r) => r.fecha))].sort().reverse();
   const ultima = fechas[0];
   const ultInv = inventarios.filter((r) => r.fecha === ultima);
-  // Inventarios incompletos (falta MAESTRO o falta REAL/D07) → aviso accionable
-  const invIncompletos = resumenInventarios(inventarios, medByV).filter((inv) => inv.estado !== "Completo")
-    .sort((a, b) => String(fmtDate(b.fecha)).localeCompare(String(fmtDate(a.fecha))));
 
   // Estadísticas (1, 2, 3, 5), cada una separada en Orales / Intravenosos
   const grupoDeV = (cv) => (medByV[cv] ? medByV[cv].grupo : null);
@@ -2633,22 +2618,6 @@ function Inicio({ inventarios, incidencias, alertas, resumenAlertas, medByV, con
   return (
     <div>
       <SectionTitle title="Inicio" desc="Estado general de la gestión de estupefacientes del Servicio de Farmacia." />
-
-      {invIncompletos.length > 0 && (
-        <Card style={{ marginBottom: 16, borderColor: C.yellow, background: C.yellowBg }}>
-          <div style={{ fontWeight: 700, color: "#854d0e", display: "flex", gap: 8, alignItems: "center" }}><ClipboardList size={17} /> Inventarios sin terminar</div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
-            {invIncompletos.map((inv) => (
-              <div key={`${fmtDate(inv.fecha)}-${inv.grupo}`} style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", justifyContent: "space-between" }}>
-                <div style={{ fontSize: 13, color: C.text }}>
-                  Inventario <b>{inv.grupo === "IV" ? "Intravenosos" : "Orales"}</b> del <b>{fmtDate(inv.fecha)}</b> {inv.estado.toLowerCase()}
-                </div>
-                <button style={btnPrimary} onClick={() => onCompletar && onCompletar(inv.fecha, inv.grupo)}>Completar</button>
-              </div>
-            ))}
-          </div>
-        </Card>
-      )}
 
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 18 }}>
         <SplitStat icon={<AlertTriangle size={18} />} label="Incidencias sin resolver" oral={cont(incGr, "ORAL")} iv={cont(incGr, "IV")} tone={incGr.length ? "warn" : "ok"} />
@@ -4117,7 +4086,7 @@ export default function App() {
             <CloudOff size={16} /> Modo local: los datos se guardan en este equipo y se sincronizarán con {BACKEND_NOMBRE} cuando haya conexión.
           </div>
         )}
-        {view === "inicio" && <Inicio inventarios={inventarios} incidencias={incidencias} alertas={alertas} resumenAlertas={resumenAlertas} medByV={medByV} config={config} goTo={setView} avisosPrevision={avisosPrevision} hayConsumos={consumos.length > 0} onCompletar={completarInventario} />}
+        {view === "inicio" && <Inicio inventarios={inventarios} incidencias={incidencias} alertas={alertas} resumenAlertas={resumenAlertas} medByV={medByV} config={config} goTo={setView} avisosPrevision={avisosPrevision} hayConsumos={consumos.length > 0} />}
         {view === "inventario" && <InventarioSemanal onSaved={guardarInventario} avisos={avisosRepo} meds={meds} medByV={medByV} config={config} inventarios={inventarios} inicioFecha={invInicio && invInicio.fecha} inicioGrupo={invInicio && invInicio.grupo} onConsumidoInicio={() => setInvInicio(null)} />}
         {view === "anteriores" && <InventariosAnteriores inventarios={inventarios} config={config} medByV={medByV} pedidos={pedidos} onEdit={guardarEdicionInventario} onCrearIncidencia={crearIncidenciaDesdeDescuadre} onCompletar={completarInventario} />}
         {view === "prevision" && <Prevision inventarios={inventarios} pedidos={pedidos} consumosGuardados={consumos} onGuardarConsumos={guardarConsumos} />}
