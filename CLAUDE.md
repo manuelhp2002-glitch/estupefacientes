@@ -223,6 +223,14 @@ Triple recuento por medicamento: **ATHOS REAL** (físico, *verdad absoluta*),
 `Real − D07` (error ATHOS) y `D07 − Maestro` (error DRAGO). Color por fila:
 sin descuadre → normal, 1–10 uds → amarillo, >10 uds → rojo. Al guardar, compara
 `real` contra MIN/MAX del catálogo (§9) y genera **avisos de reposición**.
+**Inventario rápido (F17):** modo a pantalla completa para móvil (ficha por medicamento,
+fases «recuento físico» REAL+D07 / «maestro»); vuelca al mismo estado de F1, borrador local
+(`estupefarma:inv-borrador:…`). Guardado **parcial** con campo `estado` (Completo /
+Incompleto · falta MAESTRO / Incompleto) por (fecha, grupo); **upsert por (fecha, grupo,
+Código V)** (sin duplicar); los campos ya guardados se **bloquean** al reabrir. Aviso en
+Inicio y botón «Completar» en F2 para inventarios incompletos. Vacío ≠ 0 en todo F1/F2.
+Lógica pura en `frontend/src/inventario/inventarioRapido.js`. `estado` persiste en Supabase
+vía `extra` (sin migración) y se añade a `HEADERS.Inventarios` en Sheets.
 
 ### F2 — Inventarios Anteriores  *(legado: `InventariosAnteriores`)*
 Consulta solo lectura de inventarios guardados. Selector de fechas con nº de

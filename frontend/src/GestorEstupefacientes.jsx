@@ -1,14 +1,16 @@
-import React, { useState, useEffect, useMemo, useRef } from "react";
+import React, { useState, useEffect, useMemo, useRef, useLayoutEffect } from "react";
 import * as XLSX from "xlsx";
 import { planSincronizacion } from "./sync/pedidosSheet.js";
 import { makeSupabaseApi } from "./api/supabaseApi.js";
 import { nombreSinCodigoV, numeroAlbaran, filtrarParaAlbaran } from "./albaran/albaran.js";
+import { invRowId, tieneValor, soloEnteroNoNeg, estadoInventario, nivelEstado, borradorKey } from "./inventario/inventarioRapido.js";
 import {
   Home, ClipboardList, History, ShieldAlert, PackageSearch, CalendarX,
   AlertTriangle, Plus, Save, X, Upload, Search, CheckCircle2, Clock,
   Settings, RefreshCw, Cloud, CloudOff, Truck, FileSpreadsheet, Trash2,
   ChevronRight, Info, Pill, Syringe, Filter, ArrowRight, ListChecks, Bell, Menu, Pencil,
-  TrendingDown, ArrowLeft, Siren, PackageCheck, Database, BellRing, Check, ClipboardCheck
+  TrendingDown, ArrowLeft, Siren, PackageCheck, Database, BellRing, Check, ClipboardCheck,
+  Smartphone, Lock, ChevronLeft
 } from "lucide-react";
 
 /* ============================================================================
@@ -675,47 +677,145 @@ function SortableTh({ label, k, sort, onSort, extra }) {
 function buildInventarioRows(meds, grupo) {
   return meds.filter((m) => m.grupo === grupo).map((m) => ({ codigoV: m.codigoV, nombre: m.nombre, real: "", d07: "", maestro: "" }));
 }
-function InventarioSemanal({ onSaved, avisos, meds, medByV, config }) {
-  const [grupo, setGrupo] = useState("ORAL");
-  const [fecha, setFecha] = useState(todayISO());
-  const [rows, setRows] = useState(() => ({ ORAL: buildInventarioRows(meds, "ORAL"), IV: buildInventarioRows(meds, "IV") }));
-  const [saving, setSaving] = useState(false);
+// Etiqueta visible del grupo + fase para el modo rápido
+const faseTxt = (fase) => fase === "maestro" ? "MAESTRO" : "RECUENTO FÍSICO";
+const grupoTxtCorto = (g) => g === "IV" ? "INTRAVENOSOS" : "ORALES";
 
-  const set = (i, campo, val) => {
+function InventarioSemanal({ onSaved, avisos, meds, medByV, config, inventarios, inicioFecha, inicioGrupo, onConsumidoInicio }) {
+  const [grupo, setGrupo] = useState(inicioGrupo || "ORAL");
+  const [fecha, setFecha] = useState(inicioFecha || todayISO());
+  const [rows, setRows] = useState(() => ({ ORAL: buildInventarioRows(meds, "ORAL"), IV: buildInventarioRows(meds, "IV") }));
+  const [locked, setLocked] = useState(() => new Set());   // `${g}:${codigoV}:${campo}` ya guardados → bloqueados
+  const [saving, setSaving] = useState(false);
+  const [rapido, setRapido] = useState(null);              // null | { vista:"config"|"ficha"|"resumen", fase, indice }
+  const [sesionBorrador, setSesionBorrador] = useState({ ORAL: null, IV: null }); // sesionRapida restaurada del borrador
+  const [cambiosSinGuardar, setCambiosSinGuardar] = useState(false);
+
+  const medsGrupo = (g) => (meds || []).filter((m) => m.grupo === g);
+
+  // Si Inicio pide abrir una fecha/grupo concretos (completar un inventario), aplícalo una vez
+  useEffect(() => {
+    if (inicioFecha) setFecha(inicioFecha);
+    if (inicioGrupo) setGrupo(inicioGrupo);
+    if ((inicioFecha || inicioGrupo) && onConsumidoInicio) onConsumidoInicio();
+    // eslint-disable-next-line
+  }, [inicioFecha, inicioGrupo]);
+
+  // Carga el contexto de la fecha: valores guardados (bloqueados) + borrador local del dispositivo.
+  // Empareja la fecha con fmtDate para tolerar que la BD la devuelva en ISO.
+  useEffect(() => {
+    const lk = new Set();
+    const leerBorrador = (g) => { try { const raw = localStorage.getItem(borradorKey(fecha, g)); return raw ? JSON.parse(raw) : null; } catch { return null; } };
+    const build = (g) => buildInventarioRows(meds, g).map((base) => {
+      const row = { ...base };
+      const saved = (inventarios || []).find((r) => r.grupo === g && r.codigoV === base.codigoV && fmtDate(r.fecha) === fmtDate(fecha));
+      if (saved) ["real", "d07", "maestro"].forEach((c) => { if (tieneValor(saved[c])) { row[c] = String(saved[c]); lk.add(`${g}:${base.codigoV}:${c}`); } });
+      return row;
+    });
+    const r = { ORAL: build("ORAL"), IV: build("IV") };
+    const ses = { ORAL: null, IV: null };
+    ["ORAL", "IV"].forEach((g) => {
+      const d = leerBorrador(g);
+      if (d && d.valores) r[g] = r[g].map((row) => {
+        const dv = d.valores[row.codigoV]; if (!dv) return row;
+        const nr = { ...row };
+        ["real", "d07", "maestro"].forEach((c) => { if (!lk.has(`${g}:${row.codigoV}:${c}`) && tieneValor(dv[c])) nr[c] = String(dv[c]); });
+        return nr;
+      });
+      if (d && d.sesionRapida) ses[g] = d.sesionRapida;
+    });
+    setRows(r); setLocked(lk); setSesionBorrador(ses); setCambiosSinGuardar(false);
+    // eslint-disable-next-line
+  }, [fecha, inventarios, meds]);
+
+  const estaBloqueado = (g, codigoV, campo) => locked.has(`${g}:${codigoV}:${campo}`);
+
+  const escribirBorrador = (rowsGrupo, g, sesionRapida) => {
+    try {
+      const valores = {};
+      rowsGrupo.forEach((r) => { valores[r.codigoV] = { real: r.real, d07: r.d07, maestro: r.maestro }; });
+      localStorage.setItem(borradorKey(fecha, g), JSON.stringify({ valores, sesionRapida: sesionRapida || null, actualizadoEn: new Date().toISOString() }));
+    } catch { /* localStorage no disponible */ }
+  };
+
+  const setCampo = (g, codigoV, campo, val, sesionRapida) => {
+    if (estaBloqueado(g, codigoV, campo)) return;
+    const limpio = soloEnteroNoNeg(val);
+    setCambiosSinGuardar(true);
     setRows((prev) => {
-      const cp = { ...prev };
-      const arr = [...cp[grupo]];
-      arr[i] = { ...arr[i], [campo]: val.replace(/[^\d-]/g, "") };
-      cp[grupo] = arr;
-      return cp;
+      const arr = prev[g].map((r) => r.codigoV === codigoV ? { ...r, [campo]: limpio } : r);
+      escribirBorrador(arr, g, sesionRapida);
+      return { ...prev, [g]: arr };
     });
   };
+  const setTabla = (i, campo, val) => { const r = rows[grupo][i]; if (r) setCampo(grupo, r.codigoV, campo, val, sesionBorrador[grupo]); };
+  const setCampoRapido = (codigoV, campo, val) => setCampo(grupo, codigoV, campo, val, rapido ? { fase: rapido.fase, indice: rapido.indice } : null);
+
   const list = rows[grupo];
+  const estadoActual = estadoInventario(list, medsGrupo(grupo));
+
+  // Modo rápido: navegación (guarda el borrador con la posición de sesión en cada paso)
+  const abrirRapido = () => setRapido({ vista: "config", fase: "fisico", indice: 0 });
+  const onEmpezar = (g, fase) => { setGrupo(g); const s = { fase, indice: 0 }; setRapido({ vista: "ficha", fase, indice: 0 }); setSesionBorrador((p) => ({ ...p, [g]: s })); escribirBorrador(rows[g], g, s); };
+  const navRapido = (indice) => { const s = { fase: rapido.fase, indice }; setRapido({ ...rapido, indice }); setSesionBorrador((p) => ({ ...p, [grupo]: s })); escribirBorrador(rows[grupo], grupo, s); };
 
   const guardar = async () => {
     setSaving(true);
     const payloadRows = [];
     ["ORAL", "IV"].forEach((g) => rows[g].forEach((r) => {
-      if (r.real === "" && r.d07 === "" && r.maestro === "") return;
-      const real = Number(r.real || 0), d07 = Number(r.d07 || 0), maestro = Number(r.maestro || 0);
+      if (!tieneValor(r.real) && !tieneValor(r.d07) && !tieneValor(r.maestro)) return; // fila totalmente vacía: no se guarda
+      const num = (v) => tieneValor(v) ? Number(v) : "";                                // vacío ≠ 0
+      const real = num(r.real), d07 = num(r.d07), maestro = num(r.maestro);
       payloadRows.push({
-        id: uid(), fecha, grupo: g, codigoV: r.codigoV, nombre: r.nombre,
-        real, d07, maestro, descRealD07: real - d07, descD07Maestro: d07 - maestro,
+        fecha, grupo: g, codigoV: r.codigoV, nombre: r.nombre, real, d07, maestro,
+        descRealD07: (real !== "" && d07 !== "") ? real - d07 : "",
+        descD07Maestro: (d07 !== "" && maestro !== "") ? d07 - maestro : "",
+        estado: estadoInventario(rows[g], medsGrupo(g)),
       });
     }));
-    await onSaved({ fecha, filas: payloadRows });
-    setSaving(false);
+    try {
+      await onSaved({ fecha, filas: payloadRows });
+      ["ORAL", "IV"].forEach((g) => { try { localStorage.removeItem(borradorKey(fecha, g)); } catch { /* noop */ } });
+      setSesionBorrador({ ORAL: null, IV: null });
+      setCambiosSinGuardar(false);
+    } finally { setSaving(false); }
   };
+
+  const hayContinuar = sesionBorrador[grupo] && typeof sesionBorrador[grupo].indice === "number";
 
   return (
     <div>
       <SectionTitle title="Inventario semanal" desc="Triple recuento: físico (fuente de verdad), ATHOS D07 y Maestro (DRAGO)."
-        right={<div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        right={<div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
           <GroupToggle value={grupo} onChange={setGrupo} />
+          <Badge level={nivelEstado(estadoActual)}>{estadoActual}</Badge>
+          {cambiosSinGuardar && <Badge level="warn">Cambios sin guardar</Badge>}
           <button style={btnPrimary} disabled={saving} onClick={guardar}>
             {saving ? <RefreshCw size={16} /> : <Save size={16} />}{saving ? "Guardando…" : "Guardar inventario"}
           </button>
         </div>} />
+
+      {/* Entrada al modo rápido (destacado en móvil) */}
+      <button onClick={abrirRapido} style={{
+        width: "100%", textAlign: "left", display: "flex", gap: 12, alignItems: "center", cursor: "pointer",
+        background: C.indigo2, color: "#fff", border: "none", borderRadius: 14, padding: "14px 18px", marginBottom: 12,
+      }}>
+        <Smartphone size={26} />
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 16, fontWeight: 800 }}>Inventario rápido</div>
+          <div style={{ fontSize: 12.5, opacity: 0.85 }}>Medicamento a medicamento, pensado para el móvil</div>
+        </div>
+        <ArrowRight size={20} />
+      </button>
+
+      {hayContinuar && (
+        <div style={{ background: C.yellowBg, border: `1px solid ${C.yellow}`, borderRadius: 12, padding: "10px 14px", marginBottom: 12, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <div style={{ fontSize: 13, color: "#854d0e", flex: 1 }}>
+            <b>Inventario rápido a medias</b> · {grupoTxtCorto(grupo).toLowerCase()} · {faseTxt(sesionBorrador[grupo].fase).toLowerCase()} · {Math.min(sesionBorrador[grupo].indice + 1, list.length)}/{list.length}
+          </div>
+          <button style={btnPrimary} onClick={() => setRapido({ vista: "ficha", fase: sesionBorrador[grupo].fase, indice: Math.min(sesionBorrador[grupo].indice, list.length - 1) })}>Continuar</button>
+        </div>
+      )}
 
       <Card style={{ marginBottom: 16, display: "flex", gap: 18, alignItems: "center", flexWrap: "wrap" }}>
         <Field label="Fecha del inventario"><input type="date" value={fecha} onChange={(e) => setFecha(e.target.value)} style={{ ...inputStyle, width: 200 }} /></Field>
@@ -723,7 +823,7 @@ function InventarioSemanal({ onSaved, avisos, meds, medByV, config }) {
           <span><span style={{ ...legendDot, background: C.yellowBg, border: `1px solid ${C.yellow}` }} /> leve</span>
           <span><span style={{ ...legendDot, background: C.orangeBg, border: `1px solid ${C.orange}` }} /> moderado</span>
           <span><span style={{ ...legendDot, background: C.redBg, border: `1px solid ${C.red}` }} /> grave</span>
-          <span style={{ color: C.sub }}>· umbrales según tipo (ver Configuración)</span>
+          <span style={{ color: C.sub }}>· los campos ya guardados aparecen bloqueados 🔒</span>
         </div>
       </Card>
 
@@ -737,22 +837,31 @@ function InventarioSemanal({ onSaved, avisos, meds, medByV, config }) {
             </tr></thead>
             <tbody>
               {list.map((r, i) => {
-                const real = Number(r.real || 0), d07 = Number(r.d07 || 0), maestro = Number(r.maestro || 0);
-                const filled = r.real !== "" || r.d07 !== "" || r.maestro !== "";
-                const dRD = real - d07, dDM = d07 - maestro;
+                const filled = tieneValor(r.real) || tieneValor(r.d07) || tieneValor(r.maestro);
+                const hayRD = tieneValor(r.real) && tieneValor(r.d07);
+                const hayDM = tieneValor(r.d07) && tieneValor(r.maestro);
+                const dRD = hayRD ? Number(r.real) - Number(r.d07) : null;
+                const dDM = hayDM ? Number(r.d07) - Number(r.maestro) : null;
                 const cat = medCat(r.codigoV, grupo);
-                const nRD = nivelDescuadre(dRD, cat, config), nDM = nivelDescuadre(dDM, cat, config);
-                const lvl = nivelPeor(nRD, nDM); // prevalece el color de mayor gravedad
-                const sl = filled ? stockLevel(real, medByV[r.codigoV]) : null;
+                const nRD = hayRD ? nivelDescuadre(dRD, cat, config) : "none";
+                const nDM = hayDM ? nivelDescuadre(dDM, cat, config) : "none";
+                const lvl = nivelPeor(nRD, nDM);
+                const sl = tieneValor(r.real) ? stockLevel(Number(r.real), medByV[r.codigoV]) : null;
+                const campoInput = (campo) => {
+                  const bloq = estaBloqueado(grupo, r.codigoV, campo);
+                  return <input value={r[campo]} readOnly={bloq} onChange={(e) => setTabla(i, campo, e.target.value)}
+                    inputMode="numeric" style={{ ...miniInput, ...(bloq ? { background: "#F3F4F6", color: C.sub, cursor: "not-allowed" } : {}) }} placeholder="—"
+                    title={bloq ? "Ya guardado — bloqueado" : undefined} />;
+                };
                 return (
                   <tr key={r.codigoV} style={{ background: filled ? rowBg[lvl] : "#fff" }}>
                     <td style={{ ...td, fontFamily: "monospace", fontSize: 12 }}>{r.codigoV}</td>
                     <td style={{ ...td, minWidth: 220 }}>{r.nombre}</td>
-                    <td style={td}><input value={r.real} onChange={(e) => set(i, "real", e.target.value)} style={miniInput} placeholder="—" /></td>
-                    <td style={td}><input value={r.d07} onChange={(e) => set(i, "d07", e.target.value)} style={miniInput} placeholder="—" /></td>
-                    <td style={td}><input value={r.maestro} onChange={(e) => set(i, "maestro", e.target.value)} style={miniInput} placeholder="—" /></td>
-                    <td style={td}>{filled ? <Badge level={nRD}>{dRD > 0 ? "+" : ""}{dRD}</Badge> : "—"}</td>
-                    <td style={td}>{filled ? <Badge level={nDM}>{dDM > 0 ? "+" : ""}{dDM}</Badge> : "—"}</td>
+                    <td style={td}>{campoInput("real")}</td>
+                    <td style={td}>{campoInput("d07")}</td>
+                    <td style={td}>{campoInput("maestro")}</td>
+                    <td style={td}>{hayRD ? <Badge level={nRD}>{dRD > 0 ? "+" : ""}{dRD}</Badge> : "—"}</td>
+                    <td style={td}>{hayDM ? <Badge level={nDM}>{dDM > 0 ? "+" : ""}{dDM}</Badge> : "—"}</td>
                     <td style={td}>{sl ? <Badge level={sl.level}>{sl.txt}</Badge> : "—"}</td>
                   </tr>
                 );
@@ -770,11 +879,228 @@ function InventarioSemanal({ onSaved, avisos, meds, medByV, config }) {
           </ul>
         </Card>
       )}
+
+      {rapido && <InventarioRapido
+        rapido={rapido} setRapido={setRapido} list={list} grupo={grupo} setGrupo={setGrupo}
+        config={config} meds={meds}
+        estaBloqueado={(codigoV, campo) => estaBloqueado(grupo, codigoV, campo)}
+        setCampo={setCampoRapido} onEmpezar={onEmpezar} onNav={navRapido}
+      />}
     </div>
   );
 }
-const miniInput = { width: 74, padding: "7px 8px", border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 13, textAlign: "center" };
+const miniInput = { width: 74, padding: "7px 8px", border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 13, textAlign: "center", boxSizing: "border-box" };
 const legendDot = { display: "inline-block", width: 12, height: 12, borderRadius: 3, verticalAlign: "middle", marginRight: 4 };
+
+/* ---------------------------------------------------------------------------
+   INVENTARIO RÁPIDO (F17) — overlay a pantalla completa, pensado para el móvil.
+   No tiene estado propio de datos: lee y escribe el MISMO estado que la tabla de
+   F1 (vía setCampo). Privacidad: ningún dato de paciente; identificador = Código V.
+--------------------------------------------------------------------------- */
+function InventarioRapido({ rapido, setRapido, list, grupo, setGrupo, config, meds, estaBloqueado, setCampo, onEmpezar, onNav }) {
+  const [confirmSalir, setConfirmSalir] = useState(false);
+  const cerrar = () => { setConfirmSalir(false); setRapido(null); };
+
+  // Altura útil sobre el teclado en iOS (mejora opcional §5.5)
+  const [vh, setVh] = useState(null);
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.visualViewport) return;
+    const on = () => setVh(window.visualViewport.height);
+    on(); window.visualViewport.addEventListener("resize", on);
+    return () => window.visualViewport.removeEventListener("resize", on);
+  }, []);
+
+  const wrap = { position: "fixed", inset: 0, zIndex: 60, background: C.bg, overflowY: "auto", display: "flex", flexDirection: "column", alignItems: "center", padding: 16, boxSizing: "border-box", height: vh ? `${vh}px` : "100%" };
+  const col = { width: "100%", maxWidth: 460, boxSizing: "border-box" };
+  const subCab = { fontSize: 12, fontWeight: 700, color: C.sub, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 6 };
+
+  if (rapido.vista === "config") {
+    const nOral = (meds || []).filter((m) => m.grupo === "ORAL").length;
+    const nIV = (meds || []).filter((m) => m.grupo === "IV").length;
+    const opt = (activo, onClick, titulo, sub) => (
+      <button onClick={onClick} style={{ width: "100%", textAlign: "left", cursor: "pointer", borderRadius: 12, padding: "12px 14px", marginBottom: 8, boxSizing: "border-box", border: `1.5px solid ${activo ? C.accent : C.border}`, background: activo ? "#EEF0FF" : "#fff" }}>
+        <div style={{ fontWeight: 700, color: C.text }}>{titulo}</div>
+        {sub && <div style={{ fontSize: 12.5, color: C.sub, marginTop: 2 }}>{sub}</div>}
+      </button>
+    );
+    return (
+      <div style={wrap}><div style={col}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <h2 style={{ margin: 0, fontSize: 20, color: C.text }}>¿Qué vas a contar?</h2>
+          <button onClick={cerrar} style={iconBtn}><X size={20} /></button>
+        </div>
+        <div style={subCab}>Grupo</div>
+        {opt(grupo === "ORAL", () => setGrupo("ORAL"), "Orales", `${nOral} medicamentos`)}
+        {opt(grupo === "IV", () => setGrupo("IV"), "Intravenosos", `${nIV} medicamentos`)}
+        <div style={{ height: 8 }} />
+        <div style={subCab}>Fase</div>
+        {opt(rapido.fase === "fisico", () => setRapido({ ...rapido, fase: "fisico" }), "Recuento físico", "ATHOS REAL y ATHOS D07, delante del armario")}
+        {opt(rapido.fase === "maestro", () => setRapido({ ...rapido, fase: "maestro" }), "Maestro", "Solo MAESTRO, consultando DRAGO Farma")}
+        <button style={{ ...btnPrimary, width: "100%", justifyContent: "center", marginTop: 14, padding: 12 }} onClick={() => onEmpezar(grupo, rapido.fase)}>Empezar <ArrowRight size={16} /></button>
+      </div></div>
+    );
+  }
+
+  if (rapido.vista === "resumen") {
+    const esMaestro = rapido.fase === "maestro";
+    const presente = (r) => esMaestro ? tieneValor(r.maestro) : (tieneValor(r.real) && tieneValor(r.d07));
+    const completados = list.filter(presente);
+    const pendientes = list.filter((r) => !presente(r));
+    const descuadres = list.map((r) => {
+      const ok = esMaestro ? (tieneValor(r.d07) && tieneValor(r.maestro)) : (tieneValor(r.real) && tieneValor(r.d07));
+      if (!ok) return null;
+      const v = esMaestro ? Number(r.d07) - Number(r.maestro) : Number(r.real) - Number(r.d07);
+      if (v === 0) return null;
+      return { r, v, n: nivelDescuadre(v, medCat(r.codigoV, grupo), config) };
+    }).filter(Boolean);
+    const tarjeta = (label, valor, tono) => (
+      <div style={{ flex: 1, minWidth: 90, background: "#fff", border: `1px solid ${C.border}`, borderRadius: 12, padding: "12px 10px", textAlign: "center", boxSizing: "border-box" }}>
+        <div style={{ fontSize: 24, fontWeight: 800, color: tono }}>{valor}</div>
+        <div style={{ fontSize: 12, color: C.sub }}>{label}</div>
+      </div>
+    );
+    return (
+      <div style={wrap}><div style={col}>
+        <h2 style={{ margin: "0 0 14px", fontSize: 20, color: C.text }}>Resumen</h2>
+        <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+          {tarjeta("Completados", completados.length, C.green)}
+          {tarjeta("Pendientes", pendientes.length, pendientes.length ? C.yellow : C.green)}
+          {tarjeta("Descuadres", descuadres.length, descuadres.length ? C.red : C.green)}
+        </div>
+        {descuadres.length > 0 && (<>
+          <div style={subCab}>Descuadres</div>
+          {descuadres.map(({ r, v, n }) => (
+            <div key={r.codigoV} style={{ display: "flex", justifyContent: "space-between", gap: 8, padding: "6px 0", fontSize: 13 }}>
+              <span style={{ color: C.text }}>{r.nombre}</span><Badge level={n}>{v > 0 ? "+" : ""}{v}</Badge>
+            </div>
+          ))}
+        </>)}
+        {pendientes.length > 0 && (<>
+          <div style={{ ...subCab, marginTop: 12 }}>Pendientes</div>
+          {pendientes.map((r) => (
+            <div key={r.codigoV} style={{ display: "flex", justifyContent: "space-between", gap: 8, padding: "6px 0", fontSize: 13 }}>
+              <span style={{ color: C.text }}>{r.nombre}</span><span style={{ color: C.sub }}>vacío</span>
+            </div>
+          ))}
+        </>)}
+        <div style={{ fontSize: 12.5, color: C.sub, margin: "14px 0" }}>Todo está volcado en el Inventario Semanal. Revisa y pulsa Guardar.</div>
+        <button style={{ ...btnPrimary, width: "100%", justifyContent: "center", padding: 12 }} onClick={cerrar}>Volver al inventario</button>
+      </div></div>
+    );
+  }
+
+  // vista "ficha"
+  const indice = Math.min(rapido.indice, list.length - 1);
+  const med = list[indice];
+  const esPrimero = indice === 0, esUltimo = indice === list.length - 1;
+  const irResumen = () => setRapido({ ...rapido, vista: "resumen" });
+  const siguiente = () => { if (esUltimo) irResumen(); else onNav(indice + 1); };
+  const anterior = () => { if (!esPrimero) onNav(indice - 1); };
+
+  return (
+    <div style={wrap}><div style={col}>
+      {confirmSalir ? (
+        <div style={{ background: "#fff", border: `1px solid ${C.border}`, borderRadius: 14, padding: 18, boxSizing: "border-box" }}>
+          <div style={{ fontWeight: 800, fontSize: 16, color: C.text, marginBottom: 6 }}>¿Salir ahora?</div>
+          <p style={{ fontSize: 13.5, color: C.sub, marginTop: 0 }}>Lo que has rellenado ya está en el Inventario Semanal. Puedes continuar luego.</p>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <button style={{ ...btnGhost, flex: 1, justifyContent: "center" }} onClick={() => setConfirmSalir(false)}>Seguir contando</button>
+            <button style={{ ...btnPrimary, flex: 1, justifyContent: "center" }} onClick={irResumen}>Ver resumen</button>
+          </div>
+        </div>
+      ) : (
+        <FichaRapida med={med} fase={rapido.fase} grupo={grupo} indice={indice} total={list.length} config={config}
+          estaBloqueado={estaBloqueado} setCampo={setCampo} esPrimero={esPrimero} esUltimo={esUltimo}
+          onAnterior={anterior} onSiguiente={siguiente} onSaltar={siguiente} onSalir={() => setConfirmSalir(true)} />
+      )}
+    </div></div>
+  );
+}
+
+function FichaRapida({ med, fase, grupo, indice, total, config, estaBloqueado, setCampo, esPrimero, esUltimo, onAnterior, onSiguiente, onSaltar, onSalir }) {
+  const realRef = useRef(null), d07Ref = useRef(null), maestroRef = useRef(null);
+
+  // Foco síncrono al primer campo vacío al cambiar de medicamento/fase (§5.3). SIN setTimeout.
+  useLayoutEffect(() => {
+    if (!med) return;
+    let ref = null;
+    if (fase === "maestro") { if (!estaBloqueado(med.codigoV, "maestro")) ref = maestroRef; }
+    else if (!estaBloqueado(med.codigoV, "real") && !tieneValor(med.real)) ref = realRef;
+    else if (!estaBloqueado(med.codigoV, "d07") && !tieneValor(med.d07)) ref = d07Ref;
+    else ref = realRef;
+    try { if (ref && ref.current) ref.current.focus({ preventScroll: true }); } catch { /* noop */ }
+    // eslint-disable-next-line
+  }, [indice, fase]);
+
+  if (!med) return null;
+
+  const esMaestro = fase === "maestro";
+  const hay = esMaestro ? (tieneValor(med.d07) && tieneValor(med.maestro)) : (tieneValor(med.real) && tieneValor(med.d07));
+  const val = esMaestro ? (Number(med.d07) - Number(med.maestro)) : (Number(med.real) - Number(med.d07));
+  const niv = hay ? nivelDescuadre(val, medCat(med.codigoV, grupo), config) : "none";
+  const descTxt = !hay ? "Se calcula al rellenar" : (val === 0 ? "Cuadra" : (niv === "crit" ? "Descuadre grave" : "Descuadre leve"));
+  const descColor = !hay ? C.sub : (val === 0 ? C.green : niv === "crit" ? C.red : niv === "orange" ? C.orange : C.yellow);
+  const descBg = !hay ? "#F3F4F6" : (val === 0 ? C.greenBg : niv === "crit" ? C.redBg : niv === "orange" ? C.orangeBg : C.yellowBg);
+
+  // Evita el blur del input (y que se cierre el teclado) al tocar un botón (§5.3)
+  const noBlur = (e) => { if (document.activeElement && document.activeElement.tagName === "INPUT") e.preventDefault(); };
+
+  const campo = (ref, label, pista, campoKey, soloLectura) => {
+    const bloq = soloLectura || estaBloqueado(med.codigoV, campoKey);
+    return (
+      <div style={{ flex: 1, minWidth: 0, background: "#fff", border: `1px solid ${C.border}`, borderRadius: 12, padding: "10px 12px", boxSizing: "border-box" }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: C.text }}>{label} {bloq && <Lock size={11} style={{ verticalAlign: -1 }} />}</div>
+        <div style={{ fontSize: 11, color: C.sub, marginBottom: 6 }}>{pista}</div>
+        <input ref={ref} type="text" inputMode="numeric" pattern="[0-9]*" autoComplete="off" enterKeyHint="next"
+          value={soloLectura ? (tieneValor(med[campoKey]) ? med[campoKey] : "—") : med[campoKey]} readOnly={bloq}
+          onChange={(e) => { if (!bloq) setCampo(med.codigoV, campoKey, e.target.value); }}
+          onKeyDown={(e) => { if (e.key !== "Enter") return; e.preventDefault(); if (!esMaestro && ref === realRef && d07Ref.current) d07Ref.current.focus({ preventScroll: true }); else onSiguiente(); }}
+          style={{ width: "100%", boxSizing: "border-box", padding: "12px 10px", fontSize: 22, textAlign: "center", borderRadius: 10, border: `1px solid ${C.border}`, background: bloq ? "#F3F4F6" : "#fff", color: bloq ? C.sub : C.text }} />
+      </div>
+    );
+  };
+
+  const navBtn = (label, onClick, opt = {}) => (
+    <button disabled={opt.disabled} onPointerDown={noBlur} onClick={onClick} style={{
+      flex: 1, justifyContent: "center", padding: "12px 8px", borderRadius: 10, fontWeight: 700, fontSize: 14, cursor: opt.disabled ? "default" : "pointer",
+      border: opt.primary ? "none" : `1px solid ${C.border}`, background: opt.primary ? C.accent : "#fff", color: opt.primary ? "#fff" : C.text,
+      opacity: opt.disabled ? 0.45 : 1, display: "inline-flex", gap: 6, alignItems: "center",
+    }}>{label}</button>
+  );
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 8 }}>
+        <button onPointerDown={noBlur} onClick={onSalir} style={{ ...btnGhost, padding: "7px 12px" }}><X size={15} /> Salir</button>
+        <div style={{ flex: 1, minWidth: 0, textAlign: "center", fontSize: 12, fontWeight: 700, color: C.sub, letterSpacing: 0.3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{grupoTxtCorto(grupo)} · {faseTxt(fase)}</div>
+        <div style={{ fontSize: 13, fontWeight: 800, color: C.text, whiteSpace: "nowrap" }}>{indice + 1}/{total}</div>
+      </div>
+      <div style={{ height: 5, background: "#E5E7EB", borderRadius: 999, overflow: "hidden", marginBottom: 14 }}>
+        <div style={{ width: `${((indice + 1) / total) * 100}%`, height: "100%", background: C.accent }} />
+      </div>
+      <div style={{ fontSize: 21, fontWeight: 800, color: C.text, lineHeight: 1.2 }}>{med.nombre}</div>
+      <div style={{ fontFamily: "monospace", fontSize: 13, color: C.sub, marginTop: 3, marginBottom: 14 }}>{med.codigoV}</div>
+      <div style={{ display: "flex", gap: 10, marginBottom: 12 }}>
+        {esMaestro ? (<>
+          {campo(d07Ref, "ATHOS D07", "Valor ya contado", "d07", true)}
+          {campo(maestroRef, "MAESTRO", "DRAGO Farma", "maestro")}
+        </>) : (<>
+          {campo(realRef, "ATHOS REAL", "Recuento físico", "real")}
+          {campo(d07Ref, "ATHOS D07", "Pantalla del Athos", "d07")}
+        </>)}
+      </div>
+      <div style={{ background: descBg, color: descColor, borderRadius: 10, padding: "10px 12px", fontSize: 14, fontWeight: 700, display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
+        <span>{esMaestro ? "D07−Maestro" : "Real−D07"}: {descTxt}</span>
+        <span>{hay ? (val > 0 ? "+" : "") + val : ""}</span>
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        {navBtn(<><ChevronLeft size={15} /> Anterior</>, onAnterior, { disabled: esPrimero })}
+        {navBtn("Saltar", onSaltar)}
+        {navBtn(esUltimo ? <>Terminar <Check size={15} /></> : <>Siguiente <ChevronRight size={15} /></>, onSiguiente, { primary: true })}
+      </div>
+    </div>
+  );
+}
 
 /* ===========================================================================
    2) INVENTARIOS ANTERIORES
@@ -867,7 +1193,7 @@ function FichaMedicamento({ open, row, med, pedidos, config, onClose }) {
   );
 }
 
-function InventariosAnteriores({ inventarios, config, medByV, pedidos, onEdit, onCrearIncidencia }) {
+function InventariosAnteriores({ inventarios, config, medByV, pedidos, onEdit, onCrearIncidencia, onCompletar }) {
   const [grupo, setGrupo] = useState("ORAL");
   const fechas = useMemo(() => [...new Set(inventarios.filter((r) => r.grupo === grupo).map((r) => r.fecha))].sort().reverse(), [inventarios, grupo]);
   const [sel, setSel] = useState(fechas[0] || "");
@@ -881,18 +1207,22 @@ function InventariosAnteriores({ inventarios, config, medByV, pedidos, onEdit, o
 
   const filas = inventarios.filter((r) => r.fecha === sel && r.grupo === grupo);
   const descPorFecha = (f) => inventarios.filter((r) => r.fecha === f && r.grupo === grupo && hayDescuadre(r)).length;
+  const medsG = Object.values(medByV || {}).filter((m) => m.grupo === grupo);
+  const estadoSel = filas.length ? estadoInventario(filas, medsG) : null;
 
-  const num = (v) => (v === "" || v == null ? 0 : Number(v));
   const val = (r, campo) => (editando && draft[r.id] != null ? draft[r.id][campo] : r[campo]); // valor efectivo (borrador si se edita)
-  const setCampo = (id, campo, v) => setDraft((prev) => ({ ...prev, [id]: { ...prev[id], [campo]: v.replace(/[^\d-]/g, "") } }));
+  const setCampo = (id, campo, v) => setDraft((prev) => ({ ...prev, [id]: { ...prev[id], [campo]: soloEnteroNoNeg(v) } }));
 
   const empezarEdicion = () => { setDraft(Object.fromEntries(filas.map((r) => [r.id, { real: r.real, d07: r.d07, maestro: r.maestro }]))); setEditando(true); };
   const cancelar = () => { setEditando(false); setDraft({}); };
   const guardar = async () => {
     setSaving(true);
+    const keep = (v) => tieneValor(v) ? Number(v) : ""; // vacío ≠ 0
     const rows = filas.map((r) => {
-      const real = num(val(r, "real")), d07 = num(val(r, "d07")), maestro = num(val(r, "maestro"));
-      return { ...r, real, d07, maestro, descRealD07: real - d07, descD07Maestro: d07 - maestro };
+      const real = keep(val(r, "real")), d07 = keep(val(r, "d07")), maestro = keep(val(r, "maestro"));
+      return { ...r, real, d07, maestro,
+        descRealD07: (real !== "" && d07 !== "") ? real - d07 : "",
+        descD07Maestro: (d07 !== "" && maestro !== "") ? d07 - maestro : "" };
     });
     await onEdit(rows);
     setSaving(false); setEditando(false); setDraft({});
@@ -913,6 +1243,10 @@ function InventariosAnteriores({ inventarios, config, medByV, pedidos, onEdit, o
       <SectionTitle title="Inventarios anteriores" desc="Consulta, edición de recuentos y reposición de inventarios guardados."
         right={<div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
           <GroupToggle value={grupo} onChange={setGrupo} />
+          {estadoSel && <Badge level={nivelEstado(estadoSel)}>{estadoSel}</Badge>}
+          {estadoSel && estadoSel !== "Completo" && onCompletar && !editando && (
+            <button style={btnPrimary} onClick={() => onCompletar(sel, grupo)}><Smartphone size={15} /> Completar</button>
+          )}
           {filas.length > 0 && (editando ? (<>
             <button style={btnGhost} onClick={cancelar} disabled={saving}>Cancelar</button>
             <button style={{ ...btnPrimary, opacity: saving ? 0.6 : 1 }} disabled={saving} onClick={guardar}><Save size={15} /> {saving ? "Guardando…" : "Guardar cambios"}</button>
@@ -950,12 +1284,13 @@ function InventariosAnteriores({ inventarios, config, medByV, pedidos, onEdit, o
                 <tbody>
                   {filas.length === 0 && <tr><td colSpan={editando ? 8 : 9} style={{ ...td, textAlign: "center", color: C.sub }}>Sin datos para esta fecha y grupo.</td></tr>}
                   {filas.map((r) => {
-                    const real = num(val(r, "real")), d07 = num(val(r, "d07")), maestro = num(val(r, "maestro"));
-                    const dRD = real - d07, dDM = d07 - maestro;
+                    const vReal = val(r, "real"), vD07 = val(r, "d07"), vMaestro = val(r, "maestro");
+                    const hayRD = tieneValor(vReal) && tieneValor(vD07), hayDM = tieneValor(vD07) && tieneValor(vMaestro);
+                    const dRD = hayRD ? Number(vReal) - Number(vD07) : null, dDM = hayDM ? Number(vD07) - Number(vMaestro) : null;
                     const cat = medCat(r.codigoV, r.grupo);
-                    const nRD = nivelDescuadre(dRD, cat, config), nDM = nivelDescuadre(dDM, cat, config);
+                    const nRD = hayRD ? nivelDescuadre(dRD, cat, config) : "none", nDM = hayDM ? nivelDescuadre(dDM, cat, config) : "none";
                     const lvl = nivelPeor(nRD, nDM); // prevalece el color de mayor gravedad
-                    const sl = stockLevel(real, medByV[r.codigoV]);
+                    const sl = tieneValor(vReal) ? stockLevel(Number(vReal), medByV[r.codigoV]) : null;
                     return (
                       <tr key={r.id} style={{ background: rowBg[lvl] }}>
                         <td style={{ ...td, fontFamily: "monospace", fontSize: 12 }}>{r.codigoV}</td>
@@ -971,14 +1306,14 @@ function InventariosAnteriores({ inventarios, config, medByV, pedidos, onEdit, o
                         </>) : (<>
                           <td style={td}>{r.real}</td><td style={td}>{r.d07}</td><td style={td}>{r.maestro}</td>
                         </>)}
-                        <td style={td}><Badge level={nRD}>{dRD > 0 ? "+" : ""}{dRD}</Badge></td>
-                        <td style={td}><Badge level={nDM}>{dDM > 0 ? "+" : ""}{dDM}</Badge></td>
+                        <td style={td}>{hayRD ? <Badge level={nRD}>{dRD > 0 ? "+" : ""}{dRD}</Badge> : "—"}</td>
+                        <td style={td}>{hayDM ? <Badge level={nDM}>{dDM > 0 ? "+" : ""}{dDM}</Badge> : "—"}</td>
                         <td style={td}>{sl ? <Badge level={sl.level}>{sl.txt}</Badge> : "—"}</td>
                         {!editando && <td style={td}>
                           <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                            {dRD !== 0 && <button style={microBtn} onClick={() => incidenciaDesde(r, "Real−D07", "ATHOS SADE", dRD)}><AlertTriangle size={12} /> Real−D07</button>}
-                            {dDM !== 0 && <button style={microBtn} onClick={() => incidenciaDesde(r, "D07−Maestro", "DRAGO Farma", dDM)}><AlertTriangle size={12} /> D07−Maestro</button>}
-                            {dRD === 0 && dDM === 0 && <span style={{ color: C.sub, fontSize: 12 }}>—</span>}
+                            {hayRD && dRD !== 0 && <button style={microBtn} onClick={() => incidenciaDesde(r, "Real−D07", "ATHOS SADE", dRD)}><AlertTriangle size={12} /> Real−D07</button>}
+                            {hayDM && dDM !== 0 && <button style={microBtn} onClick={() => incidenciaDesde(r, "D07−Maestro", "DRAGO Farma", dDM)}><AlertTriangle size={12} /> D07−Maestro</button>}
+                            {(!hayRD || dRD === 0) && (!hayDM || dDM === 0) && <span style={{ color: C.sub, fontSize: 12 }}>—</span>}
                           </div>
                         </td>}
                       </tr>
@@ -2240,10 +2575,25 @@ function Incidencias({ incidencias, onCreate, onUpdate, prefill, clearPrefill, m
 /* ===========================================================================
    INICIO
 =========================================================================== */
-function Inicio({ inventarios, incidencias, alertas, resumenAlertas, medByV, config, goTo, avisosPrevision = [], hayConsumos }) {
+// Agrupa las líneas de inventario por (fecha, grupo) y calcula el estado de cada inventario.
+function resumenInventarios(inventarios, medByV) {
+  const meds = Object.values(medByV || {});
+  const byKey = new Map();
+  (inventarios || []).forEach((r) => {
+    const k = `${fmtDate(r.fecha)}__${r.grupo}`;
+    if (!byKey.has(k)) byKey.set(k, { fecha: r.fecha, grupo: r.grupo, filas: [] });
+    byKey.get(k).filas.push(r);
+  });
+  return [...byKey.values()].map((inv) => ({ ...inv, estado: estadoInventario(inv.filas, meds.filter((m) => m.grupo === inv.grupo)) }));
+}
+
+function Inicio({ inventarios, incidencias, alertas, resumenAlertas, medByV, config, goTo, avisosPrevision = [], hayConsumos, onCompletar }) {
   const fechas = [...new Set(inventarios.map((r) => r.fecha))].sort().reverse();
   const ultima = fechas[0];
   const ultInv = inventarios.filter((r) => r.fecha === ultima);
+  // Inventarios incompletos (falta MAESTRO o falta REAL/D07) → aviso accionable
+  const invIncompletos = resumenInventarios(inventarios, medByV).filter((inv) => inv.estado !== "Completo")
+    .sort((a, b) => String(fmtDate(b.fecha)).localeCompare(String(fmtDate(a.fecha))));
 
   // Estadísticas (1, 2, 3, 5), cada una separada en Orales / Intravenosos
   const grupoDeV = (cv) => (medByV[cv] ? medByV[cv].grupo : null);
@@ -2283,6 +2633,22 @@ function Inicio({ inventarios, incidencias, alertas, resumenAlertas, medByV, con
   return (
     <div>
       <SectionTitle title="Inicio" desc="Estado general de la gestión de estupefacientes del Servicio de Farmacia." />
+
+      {invIncompletos.length > 0 && (
+        <Card style={{ marginBottom: 16, borderColor: C.yellow, background: C.yellowBg }}>
+          <div style={{ fontWeight: 700, color: "#854d0e", display: "flex", gap: 8, alignItems: "center" }}><ClipboardList size={17} /> Inventarios sin terminar</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
+            {invIncompletos.map((inv) => (
+              <div key={`${fmtDate(inv.fecha)}-${inv.grupo}`} style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", justifyContent: "space-between" }}>
+                <div style={{ fontSize: 13, color: C.text }}>
+                  Inventario <b>{inv.grupo === "IV" ? "Intravenosos" : "Orales"}</b> del <b>{fmtDate(inv.fecha)}</b> {inv.estado.toLowerCase()}
+                </div>
+                <button style={btnPrimary} onClick={() => onCompletar && onCompletar(inv.fecha, inv.grupo)}>Completar</button>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
 
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 18 }}>
         <SplitStat icon={<AlertTriangle size={18} />} label="Incidencias sin resolver" oral={cont(incGr, "ORAL")} iv={cont(incGr, "IV")} tone={incGr.length ? "warn" : "ok"} />
@@ -3546,31 +3912,40 @@ export default function App() {
 
   // Inventario (una escritura por lotes a la pestaña Inventarios)
   const guardarInventario = async ({ fecha, filas }) => {
-    setInventarios((prev) => [...prev, ...filas]);
-    await enqueue({ action: "appendMany", sheet: "Inventarios", rows: filas });
-    // Avisos de reposición → se muestran y se registran como alertas accionables (pedido)
+    // Upsert por (fecha, grupo, Código V): re-guardar actualiza la misma fila, nunca duplica.
+    const prev = inventarios;
+    const clave = (r) => `${fmtDate(r.fecha)}__${r.grupo}__${r.codigoV}`;
+    const prevByKey = new Map(prev.map((r) => [clave(r), r]));
+    const guardadas = filas.map((f) => { const ex = prevByKey.get(clave(f)); return { ...f, id: ex ? ex.id : invRowId(fecha, f.grupo, f.codigoV) }; });
+    setInventarios((p) => { const m = new Map(p.map((r) => [clave(r), r])); guardadas.forEach((r) => m.set(clave(r), r)); return [...m.values()]; });
+    for (const r of guardadas) {
+      const existia = prevByKey.has(clave(r));
+      await enqueue(existia ? { action: "update", sheet: "Inventarios", id: r.id, row: r } : { action: "append", sheet: "Inventarios", row: r });
+    }
+    // Avisos de reposición (solo filas con REAL presente; vacío ≠ 0)
     const avisos = [];
-    filas.forEach((f) => { const sl = stockLevel(f.real, medByV[f.codigoV]); if (sl && (sl.level === "warn" || sl.level === "crit")) avisos.push({ codigoV: f.codigoV, nombre: f.nombre, accion: sl.txt, real: f.real, level: sl.level }); });
+    guardadas.forEach((f) => { if (!tieneValor(f.real)) return; const sl = stockLevel(Number(f.real), medByV[f.codigoV]); if (sl && (sl.level === "warn" || sl.level === "crit")) avisos.push({ codigoV: f.codigoV, nombre: f.nombre, accion: sl.txt, real: Number(f.real), level: sl.level }); });
     setAvisosRepo(avisos);
     if (avisos.length) {
       const alertRows = avisos.map((a) => alertaReposicion(a, fecha));
-      setAlertas((prev) => mergeAlertas(prev, alertRows));
+      setAlertas((p2) => mergeAlertas(p2, alertRows));
       await enqueue({ action: "appendMany", sheet: "Alertas", rows: alertRows });
     }
-    // Alertas de descuadre (#22): una por columna de descuadre cuyo nivel tenga alerta activada en Configuración
+    // Alertas de descuadre (#22): solo cuando el descuadre está realmente calculado
     const alertDesc = [];
-    filas.forEach((f) => {
+    guardadas.forEach((f) => {
       const cat = medCat(f.codigoV, f.grupo);
       [["Real−D07", f.descRealD07], ["D07−Maestro", f.descD07Maestro]].forEach(([etq, val]) => {
+        if (!tieneValor(val)) return;
         const nivel = nivelDescuadre(val, cat, config);
         if (nivel !== "none" && config.alertaDescuadre && config.alertaDescuadre[nivel]) alertDesc.push(alertaDescuadre(f, fecha, etq, val, nivel));
       });
     });
     if (alertDesc.length) {
-      setAlertas((prev) => mergeAlertas(prev, alertDesc));
+      setAlertas((p2) => mergeAlertas(p2, alertDesc));
       await enqueue({ action: "appendMany", sheet: "Alertas", rows: alertDesc });
     }
-    notify(`Inventario guardado (${filas.length} líneas)${avisos.length ? ` · ${avisos.length} avisos de reposición` : ""}${alertDesc.length ? ` · ${alertDesc.length} alertas de descuadre` : ""}${pendSuffix()}`);
+    notify(`Inventario guardado (${guardadas.length} línea${guardadas.length === 1 ? "" : "s"})${avisos.length ? ` · ${avisos.length} avisos` : ""}${alertDesc.length ? ` · ${alertDesc.length} alertas` : ""}${pendSuffix()}`);
   };
 
   // Editar recuentos de un inventario ya guardado (#3): actualiza estado + Sheet (solo filas cambiadas)
@@ -3587,6 +3962,9 @@ export default function App() {
   };
   // Abrir el formulario de Incidencias con datos prellenados desde un descuadre (#4)
   const crearIncidenciaDesdeDescuadre = (prefill) => { setIncPrefill(prefill); setView("incidencias"); };
+  // Completar un inventario incompleto: abre F1 en esa fecha+grupo (desde F2 o Inicio)
+  const [invInicio, setInvInicio] = useState(null); // { fecha, grupo } | null
+  const completarInventario = (fecha, grupo) => { setInvInicio({ fecha, grupo }); setView("inventario"); };
 
   // Pedidos
   const crearPedido = async (p) => {
@@ -3739,9 +4117,9 @@ export default function App() {
             <CloudOff size={16} /> Modo local: los datos se guardan en este equipo y se sincronizarán con {BACKEND_NOMBRE} cuando haya conexión.
           </div>
         )}
-        {view === "inicio" && <Inicio inventarios={inventarios} incidencias={incidencias} alertas={alertas} resumenAlertas={resumenAlertas} medByV={medByV} config={config} goTo={setView} avisosPrevision={avisosPrevision} hayConsumos={consumos.length > 0} />}
-        {view === "inventario" && <InventarioSemanal onSaved={guardarInventario} avisos={avisosRepo} meds={meds} medByV={medByV} config={config} />}
-        {view === "anteriores" && <InventariosAnteriores inventarios={inventarios} config={config} medByV={medByV} pedidos={pedidos} onEdit={guardarEdicionInventario} onCrearIncidencia={crearIncidenciaDesdeDescuadre} />}
+        {view === "inicio" && <Inicio inventarios={inventarios} incidencias={incidencias} alertas={alertas} resumenAlertas={resumenAlertas} medByV={medByV} config={config} goTo={setView} avisosPrevision={avisosPrevision} hayConsumos={consumos.length > 0} onCompletar={completarInventario} />}
+        {view === "inventario" && <InventarioSemanal onSaved={guardarInventario} avisos={avisosRepo} meds={meds} medByV={medByV} config={config} inventarios={inventarios} inicioFecha={invInicio && invInicio.fecha} inicioGrupo={invInicio && invInicio.grupo} onConsumidoInicio={() => setInvInicio(null)} />}
+        {view === "anteriores" && <InventariosAnteriores inventarios={inventarios} config={config} medByV={medByV} pedidos={pedidos} onEdit={guardarEdicionInventario} onCrearIncidencia={crearIncidenciaDesdeDescuadre} onCompletar={completarInventario} />}
         {view === "prevision" && <Prevision inventarios={inventarios} pedidos={pedidos} consumosGuardados={consumos} onGuardarConsumos={guardarConsumos} />}
         {view === "detector" && <DetectorAlertas onResumen={registrarResumenAlertas} onGuardarCruce={guardarCruce} sheetsConnected={connected} onNombrePaciente={() => notify("⚠️ Posible nombre de paciente detectado y excluido del procesamiento", "crit")} medByV={medByV} />}
         {view === "alertas" && <AlertasView alertas={alertas} onEstado={marcarAlerta} onPedir={pedirDesdeAlerta} />}

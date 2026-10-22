@@ -35,7 +35,7 @@ function ss_() {
 
 // Cabeceras base por pestaña (id siempre la primera). Se auto-extienden en escritura.
 var HEADERS = {
-  Inventarios: ["id", "fecha", "grupo", "codigoV", "nombre", "real", "d07", "maestro", "descRealD07", "descD07Maestro"],
+  Inventarios: ["id", "fecha", "grupo", "codigoV", "nombre", "real", "d07", "maestro", "descRealD07", "descD07Maestro", "estado"],
   Pedidos: ["id", "vale", "cn", "estupefaciente", "proveedor", "fechaPedido", "udsPedidas", "udsRecibidas", "fechaEntrada", "farmaceutico", "noServido", "incidencias", "avisoLlegada", "horaAviso", "uds", "estado", "incidenciasPrevias"],
   Caducados: ["id", "cn", "nombre", "lote", "fechaCaducidad", "unidades"],
   Incidencias: ["id", "tipo", "medicamento", "fechaHora", "movimiento", "cantidad", "sistema", "descripcion", "medida", "estado", "farmaceutico"],
